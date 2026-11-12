@@ -1,0 +1,8 @@
+{
+  "name": "Vardiya 112",
+  "description": "112 Acil Çağrı Merkezi ve Acil Sağlık Hizmetleri için canlı vardiya takip, gerçek 3D dünya, 5'li grup döngüsü, nöbet değişimi ve takvim yönetim sistemi.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "capabilities": []
+}
