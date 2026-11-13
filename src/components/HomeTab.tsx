@@ -230,7 +230,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
       </div>
 
       {/* 2. FIVE VERTICAL GROUP CARDS WITH EXPRESSIVE ICONS (1, 2, 3, 4, 5) */}
-      <div className="w-full max-w-sm">
+      <div className="w-full max-w-sm mt-[15px]">
         <div
           className="grid gap-2"
           style={{
@@ -290,7 +290,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                 className={`py-2 px-1 rounded-2xl flex flex-col items-center justify-between min-h-[88px] transition cursor-pointer ${cardBgClass} ${highlightFrameClass}`}
               >
                 <span
-                  className={`text-sm font-extrabold leading-none truncate max-w-full ${
+                  className={`font-display text-[15px] font-extrabold tracking-tight leading-none truncate max-w-full ${
                     isHighlighted
                       ? 'text-rose-400'
                       : isLight
@@ -305,7 +305,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                   {iconEmoji}
                 </span>
 
-                <span className={`text-[9.5px] sm:text-[10px] font-bold leading-none tracking-tighter whitespace-nowrap ${labelColorClass}`}>
+                <span className={`text-[10px] font-semibold leading-none tracking-[-0.01em] whitespace-nowrap ${labelColorClass}`}>
                   {statusLabel}
                 </span>
               </button>
@@ -360,12 +360,16 @@ export const HomeTab: React.FC<HomeTabProps> = ({
         <div className="grid grid-cols-[1.15fr_auto_1fr] items-center gap-3">
           {/* Left Column: Today's Status (Only User's Status) */}
           <div className="flex flex-col justify-center text-left min-w-0">
-            <div className="text-[11px] font-semibold text-slate-400 truncate">
+            <div
+              className={`text-[10px] font-extrabold uppercase tracking-[0.14em] truncate ${
+                isLight ? 'text-rose-600/90' : 'text-rose-400/90'
+              }`}
+            >
               {isTodaySelected ? 'Bugünün Durumu' : trDateFormatter(singleQueryDate)}
             </div>
 
             <div
-              className={`mt-1 text-xl sm:text-2xl font-black tracking-tight leading-tight truncate ${
+              className={`font-display mt-1 text-[21px] sm:text-[23px] font-extrabold tracking-[-0.02em] leading-tight truncate ${
                 isLight ? 'text-slate-900' : 'text-white'
               }`}
             >
@@ -386,25 +390,34 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           <div className={`w-px h-14 ${isLight ? 'bg-rose-200/80' : 'bg-white/10'}`} />
 
           {/* Right Column: Monthly Stats */}
-          <div className="flex flex-col justify-center gap-1.5 text-xs font-bold">
-            <div className="flex items-center gap-2">
-              <span className="text-xs leading-none">📅</span>
-              <span className={isLight ? 'text-slate-800' : 'text-slate-100'}>
-                Nöbet: {monthlyStats.dutyDays} gün
+          <div className="flex flex-col justify-center gap-1.5 text-[11.5px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+                <span className="text-xs leading-none">📅</span>
+                <span>Nöbet</span>
+              </span>
+              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                {monthlyStats.dutyDays} gün
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs leading-none">🛋️</span>
-              <span className={isLight ? 'text-slate-800' : 'text-slate-100'}>
-                Dinlenme: {monthlyStats.restDays} gün
+            <div className="flex items-center justify-between gap-2">
+              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+                <span className="text-xs leading-none">🛋️</span>
+                <span>Dinlenme</span>
+              </span>
+              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                {monthlyStats.restDays} gün
               </span>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs leading-none">🕗</span>
-              <span className={isLight ? 'text-slate-800' : 'text-slate-100'}>
-                Toplam: {monthlyStats.totalHours} sa
+            <div className="flex items-center justify-between gap-2">
+              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
+                <span className="text-xs leading-none">🕗</span>
+                <span>Toplam</span>
+              </span>
+              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
+                {monthlyStats.totalHours} sa
               </span>
             </div>
           </div>

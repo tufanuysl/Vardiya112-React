@@ -193,8 +193,8 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       const rect = wrapper.getBoundingClientRect();
       // Distance from the very top of the viewport (y=0) to the top of wrapper
       const topGap = Math.max(0, Math.round(rect.top));
-      // Extend 6px below wrapper so it meets the top border of the 5 group boxes
-      const bottomExtend = 6;
+      // Extend 21px below wrapper so it meets the top border of the 5 group boxes
+      const bottomExtend = 21;
       const totalH = Math.max(320, Math.round(rect.height + topGap + bottomExtend));
       const totalW = Math.max(360, Math.round(rect.width + 56));
 
@@ -721,42 +721,46 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         )}
       </svg>
 
-      {/* Balanced Centered Overlay on the Globe (Matching Reference Design) */}
-      <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-center px-4 pointer-events-none">
-        {/* 1. ŞU AN NÖBETTE Capsule */}
-        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-black/55 backdrop-blur-md border border-white/10 shadow-md">
-          <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" />
-          <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-white/90">
+      {/* Centered Overlay on the Globe */}
+      <div className="absolute inset-0 z-30 flex flex-col items-center justify-center text-center px-5 pointer-events-none">
+        {/* 1. Eyebrow Status Capsule */}
+        <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-slate-950/65 backdrop-blur-md border border-white/20 shadow-md">
+          <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
+          <span className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-white leading-normal">
             ŞU AN NÖBETTE
           </span>
         </div>
 
-        {/* 2. Large Group Title */}
+        {/* 2. Hero Group Title (solid white + textShadow, no bg-clip-text or overflow clipping) */}
         <h2
-          className="mt-2 text-4xl sm:text-[42px] font-black tracking-tight text-white leading-none"
-          style={{ textShadow: '0 4px 18px rgba(0,0,0,0.85)' }}
+          className="font-display mt-2 py-0.5 text-[44px] sm:text-[48px] font-black tracking-tight text-white leading-none"
+          style={{ textShadow: '0 4px 18px rgba(0,0,0,0.92), 0 2px 5px rgba(0,0,0,0.98)' }}
         >
           {groupName}
         </h2>
 
-        {/* 3. Personnel Names */}
-        {members ? (
+        {/* 3. Personnel Names (scaled down and aligned within the width of the group title) */}
+        {members && (
           <p
-            className="mt-1.5 text-xs font-medium text-slate-200/90 max-w-[220px] truncate"
-            style={{ textShadow: '0 2px 8px rgba(0,0,0,0.9)' }}
+            className="mt-1 text-[10.5px] sm:text-[11px] font-medium tracking-tight text-slate-100/95 max-w-[168px] sm:max-w-[182px] mx-auto text-center leading-tight"
+            style={{ textShadow: '0 2px 10px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.95)' }}
           >
             {members}
           </p>
-        ) : (
-          <div className="mt-1" />
         )}
 
         {/* 4. Shift Type Pill */}
-        <div className="mt-2.5 inline-flex items-center gap-1.5 px-4 py-1 rounded-full bg-black/55 backdrop-blur-md border border-white/15 shadow-md">
-          <span className="text-xs leading-none">
+        <div
+          className={`mt-2.5 inline-flex items-center gap-1.5 px-4 py-1 rounded-full backdrop-blur-md border shadow-md ${
+            shiftType.includes('Gündüz')
+              ? 'bg-amber-950/65 border-amber-300/40 text-amber-50'
+              : 'bg-indigo-950/65 border-indigo-300/40 text-indigo-50'
+          }`}
+        >
+          <span className="text-xs leading-normal">
             {shiftType.includes('Gündüz') ? '☀️' : '🌙'}
           </span>
-          <span className="text-xs font-bold text-white tracking-wide">
+          <span className="text-xs font-bold tracking-wide text-white leading-normal">
             {shiftType}
           </span>
         </div>
@@ -764,10 +768,12 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         {/* 5. Progress % & Remaining Time */}
         {remainText && (
           <div
-            className="mt-2 text-[11px] font-bold text-rose-300/95 tracking-wide"
-            style={{ textShadow: '0 2px 8px rgba(0,0,0,0.9)' }}
+            className="mt-2 inline-flex items-center gap-1.5 text-xs tracking-wide tabular-nums leading-normal"
+            style={{ textShadow: '0 2px 10px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.95)' }}
           >
-            %{progressPct} • {remainText}
+            <span className="font-extrabold text-rose-300">%{progressPct}</span>
+            <span className="text-white/60">•</span>
+            <span className="font-bold text-white">{remainText}</span>
           </div>
         )}
       </div>
