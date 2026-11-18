@@ -25,6 +25,16 @@ export interface ShiftPresetOption {
 
 export type NotificationSoundId = 'chime' | 'telsiz' | 'radar' | 'soft' | 'silent';
 
+export type AppThemeId =
+  | 'dark'
+  | 'light'
+  | 'emerald'
+  | 'ocean'
+  | 'sunset'
+  | 'amethyst'
+  | 'amoled'
+  | 'sand';
+
 export interface AppSettings {
   shiftPreset?: ShiftPresetId;
   dayStart: string; // e.g. "09:00"
@@ -41,7 +51,8 @@ export interface AppSettings {
   groupCycleMode?: '112_CLASSIC' | 'SEQUENTIAL';
   groupNames: string[];
   groupMembers: string[];
-  theme: 'dark' | 'light';
+  theme: AppThemeId;
+  defaultStartTab?: 'home' | 'calendar';
   reminderMinutesBefore?: number; // 0, 15, 30, 60 (minutes before shift start)
   notificationSound?: NotificationSoundId;
 }
@@ -61,6 +72,8 @@ export interface NoteItem {
   isNewRef: boolean;
   swapTargetDate?: string; // ISO "YYYY-MM-DD"
   swapShiftType?: 'GUNDUZ' | 'AKSAM';
+  swapWithPerson?: string; // Nöbet değişimi yapılan karşı personel
+  swapMyPerson?: string; // Kendi grubumdan nöbeti değişen (eski) personel
 }
 
 export interface ShiftInstance {
@@ -83,3 +96,26 @@ export interface SingleDayQueryResult {
   statusText: string;
   notes: NoteItem[];
 }
+
+export type ProfileAvatarColor = 'emerald' | 'sky' | 'amber' | 'rose' | 'indigo';
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  role?: string;
+  avatarColor: ProfileAvatarColor;
+  groupIdx: number;
+  isGroupConfirmed: boolean;
+  matchedSource?: string; // e.g. "Personel Listesi", "Nöbet Tarihi", "PDF/Fotoğraf Çizelgesi"
+  refHistory: RefRecord[];
+  notes: NoteItem[];
+  createdAt: string;
+}
+
+export interface ProfileGroupMatchResult {
+  groupIdx: number;
+  groupName: string;
+  matchedMemberName: string;
+  confidence: 'exact' | 'partial';
+}
+

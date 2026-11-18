@@ -4,5 +4,8 @@
   "requestFramePermissions": [
     "microphone"
   ],
-  "capabilities": []
+  "capabilities": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AppSettings, RefRecord } from '../types';
 import { trDateFormatter, toISODate, createLocalDate, addDays } from '../shiftEngine';
+import { isLightTheme } from '../themes';
 import { Plus, Minus, X, Check } from 'lucide-react';
 
 interface SetupReferenceModalProps {
@@ -24,7 +25,7 @@ export const SetupReferenceModal: React.FC<SetupReferenceModalProps> = ({
   const [rDate, setRDate] = useState(baseRef.refDate || toISODate(new Date()));
   const [rType, setRType] = useState<'GUNDUZ' | 'AKSAM'>(baseRef.refType || 'GUNDUZ');
 
-  const isLight = settings.theme === 'light';
+  const isLight = isLightTheme(settings.theme);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">

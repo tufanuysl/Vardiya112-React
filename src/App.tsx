@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { AppSettings, NoteItem, RefRecord } from './types';
+import { AppSettings, NoteItem, RefRecord, UserProfile } from './types';
 import {
   loadStoredSettings,
   saveStoredSettings,
@@ -9,6 +9,11 @@ import {
   saveStoredNotes,
   loadStoredConfigured,
   saveStoredConfigured,
+  loadStoredProfiles,
+  saveStoredProfiles,
+  loadActiveProfileId,
+  saveActiveProfileId,
+  findMatchingGroupByName,
   resetAllStorage,
   DEFAULT_SETTINGS,
   DEFAULT_REFS,
@@ -26,8 +31,10 @@ import { SetupReferenceModal } from './components/SetupReferenceModal';
 import { QuickNoteModal } from './components/QuickNoteModal';
 import { DeveloperInfoModal } from './components/DeveloperInfoModal';
 import { BuiltInTestModal } from './components/BuiltInTestModal';
+import { ProfileManagerModal } from './components/ProfileManagerModal';
 import { ToastNotification, ToastMessage } from './components/ToastNotification';
-import { Settings, Sun, Moon } from 'lucide-react';
+import { getThemePreset } from './themes';
+import { Settings } from 'lucide-react';
 
 export const App: React.FC = () => {
   const [configured, setConfigured] = useState<boolean>(() => loadStoredConfigured());
@@ -35,8 +42,20 @@ export const App: React.FC = () => {
   const [refHistory, setRefHistory] = useState<RefRecord[]>(() => loadStoredRefHistory());
   const [notes, setNotes] = useState<NoteItem[]>(() => loadStoredNotes());
 
-  // Minimal 2-Tab Navigation: 'home' | 'calendar'
-  const [activeTab, setActiveTab] = useState<'home' | 'calendar'>('home');
+  const [profiles, setProfiles] = useState<UserProfile[]>(() =>
+    loadStoredProfiles(loadStoredSettings(), loadStoredRefHistory(), loadStoredNotes())
+  );
+  const [activeProfileId, setActiveProfileId] = useState<string>(() =>
+    loadActiveProfileId(
+      loadStoredProfiles(loadStoredSettings(), loadStoredRefHistory(), loadStoredNotes())
+    )
+  );
+  const [showProfileModal, setShowProfileModal] = useState<boolean>(false);
+
+  // Minimal 2-Tab Navigation: 'home' | 'calendar' (initializes from user's preferred defaultStartTab)
+  const [activeTab, setActiveTab] = useState<'home' | 'calendar'>(() =>
+    loadStoredSettings().defaultStartTab === 'calendar' ? 'calendar' : 'home'
+  );
   const [swipeOffset, setSwipeOffset] = useState<number>(0);
   const [isSwiping, setIsSwiping] = useState<boolean>(false);
   const swipeStartRef = React.useRef<{
@@ -46,6 +65,7 @@ export const App: React.FC = () => {
     locked: 'x' | 'y' | null;
   } | null>(null);
   const didSwipeDragRef = React.useRef<boolean>(false);
+  const dockLongPressTimerRef = React.useRef<number | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
 
   // Live Duty Clock & Manual Date/Time
@@ -189,10 +209,38 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [isLiveDutyMode, settings, refHistory, notes, triggerShiftToast]);
 
-  const handleUpdateSettings = useCallback((newSettings: AppSettings) => {
-    setSettings(newSettings);
-    saveStoredSettings(newSettings);
-  }, []);
+  const handleUpdateSettings = useCallback(
+    (newSettings: AppSettings) => {
+      setSettings((prev) => {
+        if (
+          newSettings.defaultStartTab &&
+          newSettings.defaultStartTab !== prev.defaultStartTab
+        ) {
+          setActiveTab(newSettings.defaultStartTab);
+        }
+        return newSettings;
+      });
+      saveStoredSettings(newSettings);
+
+      // Check if active profile's name now matches a group in updated groupMembers
+      const activeProf = profiles.find((p) => p.id === activeProfileId);
+      if (activeProf && activeProf.name && activeProf.name !== 'Ana Profilim') {
+        const match = findMatchingGroupByName(
+          activeProf.name,
+          newSettings.groupMembers,
+          newSettings.groupNames
+        );
+        if (match && match.groupIdx !== activeProf.groupIdx) {
+          triggerShiftToast(
+            'Otomatik Grup Eşleşmesi Tespit Edildi',
+            `${activeProf.name} ismi ${match.groupName} personel listesinde bulundu. Profil ekranından onaylayabilirsiniz.`,
+            'custom'
+          );
+        }
+      }
+    },
+    [profiles, activeProfileId, triggerShiftToast]
+  );
 
   const handleSaveNotes = useCallback(
     (newNotes: NoteItem[], newRefs: RefRecord[]) => {
@@ -204,8 +252,99 @@ export const App: React.FC = () => {
         setConfigured(true);
         saveStoredConfigured(true);
       }
+
+      // Sync active profile's refHistory, notes, and groupIdx
+      setProfiles((prev) => {
+        const next = prev.map((p) =>
+          p.id === activeProfileId
+            ? {
+                ...p,
+                groupIdx: newRefs[0] ? newRefs[0].myGroupIdx : p.groupIdx,
+                isGroupConfirmed: newRefs.length > 0 ? true : p.isGroupConfirmed,
+                refHistory: newRefs,
+                notes: newNotes,
+              }
+            : p
+        );
+        saveStoredProfiles(next);
+        return next;
+      });
     },
-    [configured]
+    [configured, activeProfileId]
+  );
+
+  const handleSelectProfile = useCallback(
+    (profileId: string) => {
+      const target = profiles.find((p) => p.id === profileId);
+      if (!target) return;
+      setActiveProfileId(target.id);
+      saveActiveProfileId(target.id);
+      setRefHistory(target.refHistory || []);
+      setNotes(target.notes || []);
+      saveStoredRefHistory(target.refHistory || []);
+      saveStoredNotes(target.notes || []);
+      const hasRef = Array.isArray(target.refHistory) && target.refHistory.length > 0;
+      setConfigured(hasRef);
+      saveStoredConfigured(hasRef);
+    },
+    [profiles]
+  );
+
+  const handleSaveProfile = useCallback(
+    (
+      savedProfile: UserProfile,
+      updatedSettings?: AppSettings,
+      makeActive: boolean = true
+    ) => {
+      if (updatedSettings) {
+        setSettings(updatedSettings);
+        saveStoredSettings(updatedSettings);
+      }
+
+      setProfiles((prev) => {
+        const exists = prev.some((p) => p.id === savedProfile.id);
+        const next = exists
+          ? prev.map((p) => (p.id === savedProfile.id ? savedProfile : p))
+          : [...prev, savedProfile];
+        saveStoredProfiles(next);
+        return next;
+      });
+
+      if (makeActive || savedProfile.id === activeProfileId) {
+        setActiveProfileId(savedProfile.id);
+        saveActiveProfileId(savedProfile.id);
+        setRefHistory(savedProfile.refHistory || []);
+        setNotes(savedProfile.notes || []);
+        saveStoredRefHistory(savedProfile.refHistory || []);
+        saveStoredNotes(savedProfile.notes || []);
+        const hasRef =
+          Array.isArray(savedProfile.refHistory) && savedProfile.refHistory.length > 0;
+        setConfigured(hasRef);
+        saveStoredConfigured(hasRef);
+      }
+    },
+    [activeProfileId]
+  );
+
+  const handleDeleteProfile = useCallback(
+    (profileId: string) => {
+      setProfiles((prev) => {
+        if (prev.length <= 1) return prev;
+        const next = prev.filter((p) => p.id !== profileId);
+        saveStoredProfiles(next);
+        if (profileId === activeProfileId && next[0]) {
+          const fallback = next[0];
+          setActiveProfileId(fallback.id);
+          saveActiveProfileId(fallback.id);
+          setRefHistory(fallback.refHistory || []);
+          setNotes(fallback.notes || []);
+          saveStoredRefHistory(fallback.refHistory || []);
+          saveStoredNotes(fallback.notes || []);
+        }
+        return next;
+      });
+    },
+    [activeProfileId]
   );
 
   const handleDeleteRef = useCallback(
@@ -229,20 +368,28 @@ export const App: React.FC = () => {
     setRefHistory(DEFAULT_REFS);
     setNotes([]);
     setConfigured(false);
+    const freshProfiles = loadStoredProfiles(DEFAULT_SETTINGS, DEFAULT_REFS, []);
+    setProfiles(freshProfiles);
+    setActiveProfileId(freshProfiles[0].id);
   }, []);
 
-  const isLight = settings.theme === 'light';
+  const activeProfile =
+    profiles.find((p) => p.id === activeProfileId) || profiles[0];
+  const themePreset = getThemePreset(settings.theme);
+  const isLight = themePreset.isLight;
 
   useEffect(() => {
     const root = document.documentElement;
-    if (settings.theme === 'light') {
+    if (themePreset.isLight) {
       root.classList.add('light');
       root.classList.remove('dark');
     } else {
       root.classList.add('dark');
       root.classList.remove('light');
     }
-  }, [settings.theme]);
+    root.style.setProperty('--bg-primary', themePreset.bgPrimary);
+    root.style.setProperty('--text-primary', themePreset.textPrimary);
+  }, [themePreset]);
 
   const finishHorizontalSwipe = () => {
     const state = swipeStartRef.current;
@@ -261,9 +408,11 @@ export const App: React.FC = () => {
 
   return (
     <div
-      className={`relative w-full h-dvh max-h-screen transition-colors duration-200 overflow-hidden flex flex-col justify-between ${
-        isLight ? 'bg-[#F8FAFC] text-[#0F172A]' : 'bg-[#090D16] text-[#F1F5F9]'
-      }`}
+      style={{
+        backgroundColor: themePreset.bgPrimary,
+        color: themePreset.textPrimary,
+      }}
+      className="relative w-full h-dvh max-h-screen transition-colors duration-200 overflow-hidden flex flex-col justify-between"
     >
       {/* Toast Notification */}
       <ToastNotification
@@ -355,6 +504,7 @@ export const App: React.FC = () => {
               settings={settings}
               refHistory={refHistory}
               notes={notes}
+              activeProfileName={activeProfile?.name}
               dutyQueryDate={dutyQueryDate}
               dutyQueryTime={dutyQueryTime}
               isLiveDutyMode={isLiveDutyMode}
@@ -427,23 +577,36 @@ export const App: React.FC = () => {
         </div>
       </main>
 
-      {/* THUMB-FRIENDLY BOTTOM NAVIGATION DOCK (Nöbet | Takvim | Tema | Ayarlar) */}
-      <div className="w-full flex justify-center pb-3 pt-1 px-4 flex-shrink-0 z-20 no-share">
+      {/* THUMB-FRIENDLY BOTTOM NAVIGATION DOCK (Nöbet | Takvim | Ayarlar) */}
+      <div className="w-full flex justify-center pb-3 pt-1 px-4 flex-shrink-0 z-30 no-share relative">
         <nav
-          className={`w-full max-w-sm flex items-center justify-between gap-1.5 p-1.5 rounded-full border shadow-lg transition-all ${
-            isLight
-              ? 'bg-white/95 border-slate-200/90 shadow-slate-200/50'
-              : 'bg-[#111622]/95 border-slate-800/90 shadow-black/50'
-          }`}
+          className={`w-full max-w-sm flex items-center justify-between gap-1.5 p-1.5 rounded-full border shadow-lg transition-all ${themePreset.dockBgClass}`}
         >
           <button
             type="button"
+            onPointerDown={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+              dockLongPressTimerRef.current = window.setTimeout(() => {
+                handleUpdateSettings({ ...settings, defaultStartTab: 'home' });
+                setActiveTab('home');
+                triggerShiftToast(
+                  'Nöbet Ekranı Ana Sayfa Yapıldı',
+                  'Uygulama açılışında ilk olarak Nöbet (3D Dünya) sayfası açılacak.',
+                  'custom'
+                );
+              }, 550);
+            }}
+            onPointerUp={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+            }}
+            onPointerLeave={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+            }}
             onClick={() => setActiveTab('home')}
+            title="Nöbet Ekranı (Ana sayfa yapmak için basılı tutun)"
             className={`flex-1 py-2 px-4 rounded-full text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'home'
-                ? isLight
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'bg-white text-slate-950 shadow-xs'
+                ? themePreset.dockActiveBtnClass
                 : isLight
                 ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -451,16 +614,38 @@ export const App: React.FC = () => {
           >
             <span className="text-sm leading-none">🚨</span>
             <span>Nöbet</span>
+            {(settings.defaultStartTab || 'home') === 'home' && (
+              <span className="text-[9px] text-amber-400 leading-none" title="Varsayılan Ana Sayfa">
+                ★
+              </span>
+            )}
           </button>
 
           <button
             type="button"
+            onPointerDown={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+              dockLongPressTimerRef.current = window.setTimeout(() => {
+                handleUpdateSettings({ ...settings, defaultStartTab: 'calendar' });
+                setActiveTab('calendar');
+                triggerShiftToast(
+                  'Takvim Ana Sayfa Yapıldı',
+                  'Uygulama açılışında ilk olarak Takvim sayfası açılacak.',
+                  'custom'
+                );
+              }, 550);
+            }}
+            onPointerUp={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+            }}
+            onPointerLeave={() => {
+              if (dockLongPressTimerRef.current) window.clearTimeout(dockLongPressTimerRef.current);
+            }}
             onClick={() => setActiveTab('calendar')}
+            title="Takvim Ekranı (Ana sayfa yapmak için basılı tutun)"
             className={`flex-1 py-2 px-4 rounded-full text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               activeTab === 'calendar'
-                ? isLight
-                  ? 'bg-slate-900 text-white shadow-xs'
-                  : 'bg-white text-slate-950 shadow-xs'
+                ? themePreset.dockActiveBtnClass
                 : isLight
                 ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
@@ -468,23 +653,14 @@ export const App: React.FC = () => {
           >
             <span className="text-sm leading-none">📅</span>
             <span>Takvim</span>
+            {settings.defaultStartTab === 'calendar' && (
+              <span className="text-[9px] text-amber-400 leading-none" title="Varsayılan Ana Sayfa">
+                ★
+              </span>
+            )}
           </button>
 
           <div className={`w-px h-5 ${isLight ? 'bg-slate-200' : 'bg-slate-800'}`} />
-
-          <button
-            type="button"
-            onClick={() => handleUpdateSettings({ ...settings, theme: isLight ? 'dark' : 'light' })}
-            className={`w-9 h-9 rounded-full flex items-center justify-center transition cursor-pointer shrink-0 ${
-              isLight
-                ? 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
-                : 'text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-            title="Temayı Değiştir"
-            aria-label="Temayı Değiştir"
-          >
-            {isLight ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-          </button>
 
           <button
             type="button"
@@ -503,6 +679,41 @@ export const App: React.FC = () => {
         </nav>
       </div>
 
+      {/* PROFILE MANAGER MODAL */}
+      {showProfileModal && (
+        <ProfileManagerModal
+          profiles={profiles}
+          activeProfileId={activeProfileId}
+          settings={settings}
+          activeRefHistory={refHistory}
+          isLight={isLight}
+          onSelectProfile={(id) => {
+            handleSelectProfile(id);
+            const prof = profiles.find((p) => p.id === id);
+            if (prof) {
+              triggerShiftToast(
+                `${prof.name} Profili Aktif`,
+                `${settings.groupNames[prof.groupIdx] || `${prof.groupIdx + 1}. Grup`} nöbet düzeni yüklendi.`,
+                'custom'
+              );
+            }
+          }}
+          onSaveProfile={(prof, updatedSettings, makeActive) => {
+            handleSaveProfile(prof, updatedSettings, makeActive);
+            triggerShiftToast(
+              'Profil ve Grup Onaylandı',
+              `${prof.name} profili ${
+                (updatedSettings || settings).groupNames[prof.groupIdx] ||
+                `${prof.groupIdx + 1}. Grup`
+              } ile onaylı olarak eşleştirildi.`,
+              'custom'
+            );
+          }}
+          onDeleteProfile={handleDeleteProfile}
+          onClose={() => setShowProfileModal(false)}
+        />
+      )}
+
       {/* SETTINGS MODAL */}
       {showSettingsModal && (
         <div
@@ -511,17 +722,20 @@ export const App: React.FC = () => {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className={`w-full max-w-lg max-h-[82vh] rounded-3xl border overflow-y-auto shadow-2xl p-3 md:p-5 cursor-default ${
-              isLight ? 'bg-[#F8FAFC] border-slate-200' : 'bg-[#0F172A] border-slate-800'
-            }`}
+            className={`w-full max-w-lg max-h-[82vh] rounded-3xl border overflow-y-auto shadow-2xl p-3 md:p-5 cursor-default ${themePreset.modalBgClass}`}
           >
             <SettingsTab
               settings={settings}
               refHistory={refHistory}
               notes={notes}
+              profiles={profiles}
+              activeProfileId={activeProfileId}
               defaultDate={singleQueryDate}
               onUpdateSettings={handleUpdateSettings}
               onSaveNotes={handleSaveNotes}
+              onSelectProfile={handleSelectProfile}
+              onSaveProfile={handleSaveProfile}
+              onDeleteProfile={handleDeleteProfile}
               onDeleteRef={handleDeleteRef}
               onResetAll={handleResetAll}
               onOpenSetupModal={() => setShowSetupModal(true)}
@@ -592,6 +806,7 @@ export const App: React.FC = () => {
           settings={settings}
           refHistory={refHistory}
           notes={notes}
+          activeProfileName={activeProfile?.name}
           onSaveNote={(newNote) => {
             const updated = [...notes, newNote];
             handleSaveNotes(updated, refHistory);

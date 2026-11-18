@@ -1,11 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { AppThemeId } from '../types';
+import { getThemePreset } from '../themes';
 
 interface Real3DEarthProps {
   groupName: string;
   shiftType: string;
   isNight: boolean;
   isLight: boolean;
+  themeId?: AppThemeId;
   members: string;
   remainText: string;
   progressFrac: number;
@@ -27,6 +31,7 @@ let cachedDayTexture: THREE.Texture | null = null;
 let cachedNightTexture: THREE.Texture | null = null;
 let cachedBumpTexture: THREE.Texture | null = null;
 let cachedCloudTexture: THREE.Texture | null = null;
+let cachedWaterTexture: THREE.Texture | null = null;
 
 function configureSeamlessTexture(tex: THREE.Texture, isColorMap: boolean): THREE.Texture {
   if (isColorMap) {
@@ -65,11 +70,18 @@ function getEarthTextures() {
       true
     );
   }
+  if (!cachedWaterTexture) {
+    cachedWaterTexture = configureSeamlessTexture(
+      textureLoader.load('/textures/earth-water.png'),
+      false
+    );
+  }
   return {
     dayTexture: cachedDayTexture,
     nightTexture: cachedNightTexture,
     bumpTexture: cachedBumpTexture,
     cloudTexture: cachedCloudTexture,
+    waterTexture: cachedWaterTexture,
   };
 }
 
@@ -161,6 +173,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
   groupName,
   shiftType,
   isLight,
+  themeId,
   members,
   remainText,
   progressFrac,
@@ -172,11 +185,13 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
   const prevMouseXRef = useRef<number>(0);
   const dragVelocityRef = useRef<number>(0);
 
-  // Dark mode = Gece görüntüsü (Stars + Moon + Night Earth)
-  // Light mode = Gündüz görüntüsü (Sun + Blue Sky Atmosphere + Day Earth)
-  const isDarkTheme = !isLight;
+  const activeThemeId: AppThemeId = themeId || (isLight ? 'light' : 'dark');
+  const themePreset = getThemePreset(activeThemeId);
+  const isDarkTheme = !themePreset.isLight;
 
-  // 1. Full-Upper-Screen Sky Canvas (starts right above the 5 group boxes and extends all the way to y=0 at the top of the screen)
+  // ============================================================================
+  // 1. THEME-SPECIFIC UPPER-SCREEN SKY CANVAS & CELESTIAL ARTIFACTS
+  // ============================================================================
   useEffect(() => {
     const skyCanvas = skyCanvasRef.current;
     const wrapper = wrapperRef.current;
@@ -188,12 +203,11 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     let width = 430;
     let height = 400;
     let earthCenterY = 220;
+    let timeTick = 0;
 
     const updateSize = () => {
       const rect = wrapper.getBoundingClientRect();
-      // Distance from the very top of the viewport (y=0) to the top of wrapper
       const topGap = Math.max(0, Math.round(rect.top));
-      // Extend 21px below wrapper so it meets the top border of the 5 group boxes
       const bottomExtend = 21;
       const totalH = Math.max(320, Math.round(rect.height + topGap + bottomExtend));
       const totalW = Math.max(360, Math.round(rect.width + 56));
@@ -214,42 +228,49 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     updateSize();
     ensureMoonSpriteLoaded();
 
-    // Sparse, simple, realistic stars distributed from the very top of the screen (ny=0.03)
-    // down to just above the 5 group boxes (ny=0.92)
+    // Theme-specific star palette
+    const themeStarPalette: Record<AppThemeId, [string, string, string]> = {
+      dark: ['#FFFFFF', '#E0F2FE', '#FEF3C7'],
+      light: ['#FFFFFF', '#E0F2FE', '#FEF08A'],
+      emerald: ['#ECFDF5', '#6EE7B7', '#A7F3D0'],
+      ocean: ['#F0F9FF', '#7DD3FC', '#38BDF8'],
+      sunset: ['#FFF7ED', '#FDE68A', '#FDBA74'],
+      amethyst: ['#FAF5FF', '#E9D5FF', '#F5D0FE'],
+      amoled: ['#FFFFFF', '#F43F5E', '#E2E8F0'],
+      sand: ['#FEF3C7', '#FDE68A', '#F59E0B'],
+    };
+    const [c1, c2, c3] = themeStarPalette[activeThemeId] || themeStarPalette.dark;
+
     const starSeeds: Array<[number, number, number, number, string]> = [
-      // Top sky band right near the top edge of the screen
-      [0.08, 0.04, 1.05, 0.78, '#FFFFFF'],
-      [0.22, 0.03, 0.85, 0.62, '#E0F2FE'],
-      [0.37, 0.05, 1.30, 0.90, '#FFFFFF'],
-      [0.52, 0.03, 0.80, 0.58, '#FEF3C7'],
-      [0.67, 0.04, 1.15, 0.82, '#E0F2FE'],
-      [0.83, 0.05, 0.90, 0.65, '#FFFFFF'],
-      [0.94, 0.04, 1.10, 0.76, '#FFFFFF'],
-      // Upper-mid sky band
-      [0.06, 0.13, 0.90, 0.64, '#FEF3C7'],
-      [0.16, 0.11, 1.35, 0.92, '#E0F2FE'],
-      [0.29, 0.12, 0.80, 0.56, '#FFFFFF'],
-      [0.45, 0.10, 0.95, 0.68, '#FFFFFF'],
-      [0.60, 0.11, 0.85, 0.60, '#E0F2FE'],
-      [0.74, 0.12, 1.10, 0.75, '#FFFFFF'],
-      [0.93, 0.14, 1.25, 0.86, '#E0F2FE'],
-      // Left sky column down to the top of the 5 group boxes
-      [0.09, 0.25, 1.15, 0.80, '#FFFFFF'],
-      [0.18, 0.29, 0.80, 0.55, '#E0F2FE'],
-      [0.06, 0.39, 0.95, 0.68, '#FEF3C7'],
-      [0.12, 0.51, 0.85, 0.60, '#FFFFFF'],
-      [0.05, 0.63, 1.30, 0.88, '#E0F2FE'],
-      [0.11, 0.75, 0.90, 0.64, '#FFFFFF'],
-      [0.06, 0.86, 1.10, 0.76, '#FEF3C7'],
-      [0.15, 0.91, 0.85, 0.60, '#FFFFFF'],
-      // Right sky column down to the top of the 5 group boxes
-      [0.93, 0.27, 0.90, 0.64, '#FFFFFF'],
-      [0.88, 0.38, 1.15, 0.80, '#FEF3C7'],
-      [0.94, 0.50, 1.25, 0.85, '#FFFFFF'],
-      [0.89, 0.62, 0.85, 0.58, '#E0F2FE'],
-      [0.94, 0.74, 1.05, 0.74, '#FFFFFF'],
-      [0.86, 0.85, 1.30, 0.88, '#FEF3C7'],
-      [0.93, 0.91, 0.90, 0.62, '#E0F2FE'],
+      [0.08, 0.04, 1.05, 0.78, c1],
+      [0.22, 0.03, 0.85, 0.62, c2],
+      [0.37, 0.05, 1.30, 0.90, c1],
+      [0.52, 0.03, 0.80, 0.58, c3],
+      [0.67, 0.04, 1.15, 0.82, c2],
+      [0.83, 0.05, 0.90, 0.65, c1],
+      [0.94, 0.04, 1.10, 0.76, c1],
+      [0.06, 0.13, 0.90, 0.64, c3],
+      [0.16, 0.11, 1.35, 0.92, c2],
+      [0.29, 0.12, 0.80, 0.56, c1],
+      [0.45, 0.10, 0.95, 0.68, c1],
+      [0.60, 0.11, 0.85, 0.60, c2],
+      [0.74, 0.12, 1.10, 0.75, c1],
+      [0.93, 0.14, 1.25, 0.86, c2],
+      [0.09, 0.25, 1.15, 0.80, c1],
+      [0.18, 0.29, 0.80, 0.55, c2],
+      [0.06, 0.39, 0.95, 0.68, c3],
+      [0.12, 0.51, 0.85, 0.60, c1],
+      [0.05, 0.63, 1.30, 0.88, c2],
+      [0.11, 0.75, 0.90, 0.64, c1],
+      [0.06, 0.86, 1.10, 0.76, c3],
+      [0.15, 0.91, 0.85, 0.60, c1],
+      [0.93, 0.27, 0.90, 0.64, c1],
+      [0.88, 0.38, 1.15, 0.80, c3],
+      [0.94, 0.50, 1.25, 0.85, c1],
+      [0.89, 0.62, 0.85, 0.58, c2],
+      [0.94, 0.74, 1.05, 0.74, c1],
+      [0.86, 0.85, 1.30, 0.88, c3],
+      [0.93, 0.91, 0.90, 0.62, c2],
     ];
 
     const stars: Star[] = starSeeds.map(([nx, ny, radius, baseAlpha, color], idx) => ({
@@ -262,7 +283,6 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       color,
     }));
 
-    // Smoothly fade only in the bottom 10% right above the 5 group boxes
     const getBottomSkyFade = (y: number) => {
       const ny = y / Math.max(1, height);
       if (ny <= 0.88) return 1;
@@ -270,22 +290,52 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       return t * t * (3 - 2 * t);
     };
 
+    const drawCrescentMoon = (
+      cx: number,
+      cy: number,
+      r: number,
+      bodyColor: string,
+      glowRgba: string,
+      shadowBgHex: string
+    ) => {
+      const halo = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, r * 3.2);
+      halo.addColorStop(0, glowRgba);
+      halo.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * 3.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.fillStyle = bodyColor;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = shadowBgHex;
+      ctx.beginPath();
+      ctx.arc(cx - r * 0.38, cy - r * 0.18, r * 0.86, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+
     const renderSky = () => {
+      timeTick += 0.016;
       ctx.clearRect(0, 0, width, height);
       const earthCenterX = width * 0.5;
       const earthRadius = 148;
 
       if (isDarkTheme) {
-        // NIGHT VIEW: Deep cosmic night gradient from y=0 (very top of screen) down to the group boxes
+        // Base Sky Gradient
         const nightSkyGrad = ctx.createLinearGradient(0, 0, 0, height);
-        nightSkyGrad.addColorStop(0, 'rgba(15, 23, 58, 0.88)');
-        nightSkyGrad.addColorStop(0.45, 'rgba(17, 24, 52, 0.55)');
-        nightSkyGrad.addColorStop(0.85, 'rgba(12, 18, 36, 0.25)');
+        nightSkyGrad.addColorStop(0, themePreset.skyTopRgba);
+        nightSkyGrad.addColorStop(0.45, themePreset.skyMidRgba);
+        nightSkyGrad.addColorStop(0.85, 'rgba(12, 18, 36, 0.18)');
         nightSkyGrad.addColorStop(1, 'rgba(9, 13, 22, 0)');
         ctx.fillStyle = nightSkyGrad;
         ctx.fillRect(0, 0, width, height);
 
-        // Subtle cosmic zenith glow near the top of the screen
+        // Zenith Glow
         const zenithGlow = ctx.createRadialGradient(
           width * 0.5,
           height * 0.12,
@@ -294,20 +344,145 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           height * 0.12,
           width * 0.65
         );
-        zenithGlow.addColorStop(0, 'rgba(59, 130, 246, 0.14)');
-        zenithGlow.addColorStop(0.6, 'rgba(79, 70, 229, 0.06)');
+        zenithGlow.addColorStop(0, themePreset.skyZenithRgba);
+        zenithGlow.addColorStop(0.6, themePreset.skyMidRgba);
         zenithGlow.addColorStop(1, 'rgba(9, 13, 22, 0)');
         ctx.fillStyle = zenithGlow;
         ctx.fillRect(0, 0, width, height);
 
-        // Sparse, realistic stars around and above the Earth
+        // -------------------------------------------------------------------
+        // THEME-SPECIFIC SKY BACKGROUND ARTIFACTS (BEFORE STARS)
+        // -------------------------------------------------------------------
+        if (activeThemeId === 'emerald') {
+          // 🚑 112 ZÜMRÜT: Waving Aurora Borealis (Kuzey Işıkları) ribbons across upper sky
+          ctx.save();
+          for (let band = 0; band < 2; band++) {
+            ctx.beginPath();
+            const baseY = 34 + band * 22;
+            ctx.moveTo(0, baseY);
+            for (let x = 0; x <= width; x += 12) {
+              const wave =
+                Math.sin(x * 0.018 + timeTick * (1.1 + band * 0.3) + band * 2) * 14 +
+                Math.cos(x * 0.032 - timeTick * 0.7) * 6;
+              ctx.lineTo(x, baseY + wave);
+            }
+            ctx.lineTo(width, 0);
+            ctx.lineTo(0, 0);
+            ctx.closePath();
+            const aurGrad = ctx.createLinearGradient(0, 0, width, baseY + 30);
+            aurGrad.addColorStop(0, 'rgba(16, 185, 129, 0)');
+            aurGrad.addColorStop(0.25, band === 0 ? 'rgba(16, 185, 129, 0.24)' : 'rgba(45, 212, 191, 0.18)');
+            aurGrad.addColorStop(0.55, band === 0 ? 'rgba(52, 211, 153, 0.30)' : 'rgba(16, 185, 129, 0.22)');
+            aurGrad.addColorStop(0.85, 'rgba(20, 184, 166, 0.18)');
+            aurGrad.addColorStop(1, 'rgba(16, 185, 129, 0)');
+            ctx.fillStyle = aurGrad;
+            ctx.fill();
+          }
+          ctx.restore();
+        } else if (activeThemeId === 'ocean') {
+          // 🌊 OKYANUS MAVİSİ: Deep Abyssal Caustic Wave Ripples & Rising Bioluminescent Motes
+          ctx.save();
+          for (let w = 0; w < 3; w++) {
+            ctx.beginPath();
+            const y0 = 24 + w * 18;
+            for (let x = 0; x <= width; x += 10) {
+              const y = y0 + Math.sin(x * 0.022 + timeTick * 1.3 + w) * 6;
+              if (x === 0) ctx.moveTo(x, y);
+              else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = `rgba(56, 189, 248, ${0.14 - w * 0.03})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+          // Bioluminescent floating water motes on left/right flanks
+          for (let b = 0; b < 10; b++) {
+            const side = b % 2 === 0 ? 0.08 + (b * 0.015) : 0.84 + ((b % 5) * 0.022);
+            const bx = side * width + Math.sin(timeTick + b) * 6;
+            const by = ((height * 0.85 - ((timeTick * 14 + b * 37) % (height * 0.8))));
+            const br = 1.6 + (b % 3) * 0.8;
+            const bGlow = ctx.createRadialGradient(bx, by, 0, bx, by, br * 4);
+            bGlow.addColorStop(0, 'rgba(34, 211, 238, 0.65)');
+            bGlow.addColorStop(1, 'rgba(34, 211, 238, 0)');
+            ctx.fillStyle = bGlow;
+            ctx.beginPath();
+            ctx.arc(bx, by, br * 4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.restore();
+        } else if (activeThemeId === 'amethyst') {
+          // 🔮 KOZMİK MOR: Spiral Nebula / Galaxy in upper-left sky
+          const galX = width * 0.18;
+          const galY = Math.max(42, earthCenterY - 118);
+          ctx.save();
+          ctx.translate(galX, galY);
+          ctx.rotate(-0.35);
+          const nebGlow = ctx.createRadialGradient(0, 0, 2, 0, 0, 46);
+          nebGlow.addColorStop(0, 'rgba(245, 208, 254, 0.75)');
+          nebGlow.addColorStop(0.35, 'rgba(192, 132, 252, 0.38)');
+          nebGlow.addColorStop(0.7, 'rgba(126, 34, 206, 0.14)');
+          nebGlow.addColorStop(1, 'rgba(13, 8, 24, 0)');
+          ctx.scale(1.6, 0.65);
+          ctx.fillStyle = nebGlow;
+          ctx.beginPath();
+          ctx.arc(0, 0, 46, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Spiral arms
+          ctx.strokeStyle = 'rgba(233, 213, 255, 0.42)';
+          ctx.lineWidth = 1.4;
+          for (let arm = 0; arm < 2; arm++) {
+            ctx.beginPath();
+            for (let t = 0; t < 3.6; t += 0.15) {
+              const r = t * 7.5;
+              const ang = t + arm * Math.PI + timeTick * 0.25;
+              const px = Math.cos(ang) * r;
+              const py = Math.sin(ang) * r;
+              if (t === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+          }
+          ctx.restore();
+        } else if (activeThemeId === 'sunset') {
+          // 🌅 KIZIL ŞAFAK: Warm Twilight Horizon Orb in upper-left + floating solar embers
+          const dawnX = width * 0.17;
+          const dawnY = Math.max(44, earthCenterY - 116);
+          const dawnGlow = ctx.createRadialGradient(dawnX, dawnY, 4, dawnX, dawnY, 64);
+          dawnGlow.addColorStop(0, 'rgba(254, 215, 170, 0.75)');
+          dawnGlow.addColorStop(0.35, 'rgba(249, 115, 22, 0.36)');
+          dawnGlow.addColorStop(0.7, 'rgba(225, 29, 72, 0.14)');
+          dawnGlow.addColorStop(1, 'rgba(19, 11, 9, 0)');
+          ctx.fillStyle = dawnGlow;
+          ctx.beginPath();
+          ctx.arc(dawnX, dawnY, 64, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Sunset striped solar disc
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(dawnX, dawnY, 15, 0, Math.PI * 2);
+          ctx.clip();
+          const sunGrad = ctx.createLinearGradient(dawnX, dawnY - 15, dawnX, dawnY + 15);
+          sunGrad.addColorStop(0, '#FEF08A');
+          sunGrad.addColorStop(0.55, '#F97316');
+          sunGrad.addColorStop(1, '#E11D48');
+          ctx.fillStyle = sunGrad;
+          ctx.fillRect(dawnX - 16, dawnY - 16, 32, 32);
+          ctx.fillStyle = 'rgba(19, 11, 9, 0.55)';
+          ctx.fillRect(dawnX - 16, dawnY + 4, 32, 2);
+          ctx.fillRect(dawnX - 16, dawnY + 9, 32, 2.5);
+          ctx.restore();
+        }
+
+        // -------------------------------------------------------------------
+        // STARS AROUND AND ABOVE THE 3D GLOBE
+        // -------------------------------------------------------------------
         for (let i = 0; i < stars.length; i++) {
           const s = stars[i];
           s.phase += s.speed;
           let sx = s.nx * width;
           let sy = s.ny * height;
 
-          // Ensure no star is hidden behind the 3D Earth sphere
           const dx = sx - earthCenterX;
           const dy = sy - earthCenterY;
           const dist = Math.sqrt(dx * dx + dy * dy);
@@ -323,15 +498,30 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           const twinkle = 0.78 + 0.22 * Math.sin(s.phase);
           const alpha = s.baseAlpha * twinkle * fade;
 
-          // Natural atmospheric halo on brighter stars
           if (s.radius >= 1.1) {
             const starGlow = ctx.createRadialGradient(sx, sy, 0, sx, sy, s.radius * 4.2);
-            starGlow.addColorStop(0, `rgba(224, 242, 254, ${alpha * 0.38})`);
+            starGlow.addColorStop(0, `rgba(224, 242, 254, ${alpha * 0.36})`);
             starGlow.addColorStop(1, 'rgba(224, 242, 254, 0)');
             ctx.fillStyle = starGlow;
             ctx.beginPath();
             ctx.arc(sx, sy, s.radius * 4.2, 0, Math.PI * 2);
             ctx.fill();
+
+            // 4-point diamond star cross on Amethyst & Emerald themes
+            if (activeThemeId === 'amethyst' || activeThemeId === 'emerald') {
+              ctx.save();
+              ctx.strokeStyle = s.color;
+              ctx.globalAlpha = alpha * 0.65;
+              ctx.lineWidth = 0.8;
+              const armLen = s.radius * 3.6;
+              ctx.beginPath();
+              ctx.moveTo(sx - armLen, sy);
+              ctx.lineTo(sx + armLen, sy);
+              ctx.moveTo(sx, sy - armLen);
+              ctx.lineTo(sx, sy + armLen);
+              ctx.stroke();
+              ctx.restore();
+            }
           }
 
           ctx.globalAlpha = alpha;
@@ -342,51 +532,179 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         }
         ctx.globalAlpha = 1;
 
-        // Calm realistic Moon in upper-right sky
+        // -------------------------------------------------------------------
+        // UPPER-RIGHT CELESTIAL ARTIFACT PER DARK THEME
+        // -------------------------------------------------------------------
         const moonX = width * 0.83;
         const moonY = Math.max(38, earthCenterY - 122);
         const moonR = 16;
 
-        const lunarHalo = ctx.createRadialGradient(
-          moonX,
-          moonY,
-          moonR * 0.7,
-          moonX,
-          moonY,
-          moonR * 3.5
-        );
-        lunarHalo.addColorStop(0, 'rgba(255, 251, 235, 0.28)');
-        lunarHalo.addColorStop(0.5, 'rgba(203, 213, 225, 0.09)');
-        lunarHalo.addColorStop(1, 'rgba(9, 13, 22, 0)');
-        ctx.fillStyle = lunarHalo;
-        ctx.beginPath();
-        ctx.arc(moonX, moonY, moonR * 3.5, 0, Math.PI * 2);
-        ctx.fill();
+        if (activeThemeId === 'amoled') {
+          // 🖤 OLED TAM SİYAH: Total Solar Eclipse (Tam Tutulma & Elmas Halka Koronası)
+          const corona = ctx.createRadialGradient(moonX, moonY, moonR * 0.85, moonX, moonY, moonR * 3.6);
+          corona.addColorStop(0, 'rgba(255, 255, 255, 0.92)');
+          corona.addColorStop(0.22, 'rgba(244, 63, 94, 0.45)');
+          corona.addColorStop(0.55, 'rgba(255, 255, 255, 0.12)');
+          corona.addColorStop(1, 'rgba(0, 0, 0, 0)');
+          ctx.fillStyle = corona;
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 3.6, 0, Math.PI * 2);
+          ctx.fill();
 
-        if (cachedMoonSprite) {
-          ctx.save();
-          ctx.globalAlpha = 0.94;
-          ctx.drawImage(
-            cachedMoonSprite,
-            moonX - moonR,
-            moonY - moonR,
-            moonR * 2,
-            moonR * 2
+          // Pitch-black eclipsing disc
+          ctx.fillStyle = '#000000';
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 0.95, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Razor-thin glowing rim
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 0.96, 0, Math.PI * 2);
+          ctx.stroke();
+
+          // Diamond ring flare on the upper-left edge of the eclipse
+          const flareAngle = -Math.PI * 0.72 + Math.sin(timeTick * 0.6) * 0.08;
+          const fx = moonX + Math.cos(flareAngle) * (moonR * 0.96);
+          const fy = moonY + Math.sin(flareAngle) * (moonR * 0.96);
+          const dFlare = ctx.createRadialGradient(fx, fy, 0, fx, fy, 14);
+          dFlare.addColorStop(0, '#FFFFFF');
+          dFlare.addColorStop(0.4, 'rgba(254, 205, 211, 0.75)');
+          dFlare.addColorStop(1, 'rgba(244, 63, 94, 0)');
+          ctx.fillStyle = dFlare;
+          ctx.beginPath();
+          ctx.arc(fx, fy, 14, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (activeThemeId === 'emerald') {
+          // 🚑 112 ZÜMRÜT: Glowing Emerald Crescent Moon
+          drawCrescentMoon(
+            moonX,
+            moonY,
+            moonR,
+            '#A7F3D0',
+            'rgba(16, 185, 129, 0.35)',
+            '#07221B'
           );
-          ctx.restore();
+        } else if (activeThemeId === 'ocean') {
+          // 🌊 OKYANUS MAVİSİ: Ice-Blue Moon with Double Atmospheric Halo Ring
+          const halo = ctx.createRadialGradient(moonX, moonY, moonR * 0.7, moonX, moonY, moonR * 3.8);
+          halo.addColorStop(0, 'rgba(186, 230, 253, 0.42)');
+          halo.addColorStop(0.5, 'rgba(56, 189, 248, 0.16)');
+          halo.addColorStop(1, 'rgba(6, 16, 30, 0)');
+          ctx.fillStyle = halo;
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 3.8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Outer ice halo ring
+          ctx.strokeStyle = 'rgba(125, 211, 252, 0.26)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 2.15, 0, Math.PI * 2);
+          ctx.stroke();
+
+          if (cachedMoonSprite) {
+            ctx.save();
+            ctx.globalAlpha = 0.95;
+            ctx.drawImage(cachedMoonSprite, moonX - moonR, moonY - moonR, moonR * 2, moonR * 2);
+            ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+            ctx.beginPath();
+            ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        } else if (activeThemeId === 'amethyst') {
+          // 🔮 KOZMİK MOR: Mystic Twin Moons (Large Violet Moon + Small Silver Crescent)
+          drawCrescentMoon(
+            moonX,
+            moonY,
+            moonR * 0.95,
+            '#E9D5FF',
+            'rgba(168, 85, 247, 0.38)',
+            '#180C2E'
+          );
+          drawCrescentMoon(
+            moonX - 24,
+            moonY + 14,
+            7,
+            '#F5D0FE',
+            'rgba(217, 70, 239, 0.32)',
+            '#180C2E'
+          );
+        } else if (activeThemeId === 'sunset') {
+          // 🌅 KIZIL ŞAFAK: Warm Amber Crescent Moon in upper-right
+          drawCrescentMoon(
+            moonX,
+            moonY,
+            13,
+            '#FDE68A',
+            'rgba(245, 158, 11, 0.34)',
+            '#24110C'
+          );
+        } else {
+          // 🌙 GECE UZAY (Default Dark): Classic Realistic Lunar Moon + Shooting Star
+          const lunarHalo = ctx.createRadialGradient(
+            moonX,
+            moonY,
+            moonR * 0.7,
+            moonX,
+            moonY,
+            moonR * 3.5
+          );
+          lunarHalo.addColorStop(0, 'rgba(255, 251, 235, 0.28)');
+          lunarHalo.addColorStop(0.5, 'rgba(203, 213, 225, 0.09)');
+          lunarHalo.addColorStop(1, 'rgba(9, 13, 22, 0)');
+          ctx.fillStyle = lunarHalo;
+          ctx.beginPath();
+          ctx.arc(moonX, moonY, moonR * 3.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (cachedMoonSprite) {
+            ctx.save();
+            ctx.globalAlpha = 0.94;
+            ctx.drawImage(
+              cachedMoonSprite,
+              moonX - moonR,
+              moonY - moonR,
+              moonR * 2,
+              moonR * 2
+            );
+            ctx.restore();
+          }
+
+          // Periodic subtle Shooting Star in upper-left sky
+          const shootCycle = timeTick % 7.5;
+          if (shootCycle < 1.1) {
+            const p = shootCycle / 1.1;
+            const sx = width * 0.14 + p * 95;
+            const sy = 22 + p * 42;
+            const tailGrad = ctx.createLinearGradient(sx, sy, sx - 38, sy - 17);
+            tailGrad.addColorStop(0, `rgba(255, 255, 255, ${(1 - p) * 0.9})`);
+            tailGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+            ctx.strokeStyle = tailGrad;
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(sx - 38, sy - 17);
+            ctx.stroke();
+          }
         }
       } else {
-        // DAY VIEW: Realistic Blue Sky Atmosphere & Sun from y=0 (very top of screen) down to the group boxes
+        // ===================================================================
+        // LIGHT THEMES ('light' & 'sand'): DAY SKY & SUN ARTIFACTS
+        // ===================================================================
         const daySkyGrad = ctx.createLinearGradient(0, 0, 0, height);
-        daySkyGrad.addColorStop(0, 'rgba(56, 189, 248, 0.52)');
-        daySkyGrad.addColorStop(0.38, 'rgba(125, 211, 252, 0.34)');
-        daySkyGrad.addColorStop(0.75, 'rgba(186, 230, 253, 0.16)');
-        daySkyGrad.addColorStop(0.92, 'rgba(224, 242, 254, 0.06)');
+        daySkyGrad.addColorStop(0, themePreset.skyTopRgba);
+        daySkyGrad.addColorStop(0.38, themePreset.skyMidRgba);
+        daySkyGrad.addColorStop(
+          0.75,
+          activeThemeId === 'sand' ? 'rgba(254, 243, 199, 0.16)' : 'rgba(186, 230, 253, 0.14)'
+        );
         daySkyGrad.addColorStop(1, 'rgba(248, 250, 252, 0)');
         ctx.fillStyle = daySkyGrad;
         ctx.fillRect(0, 0, width, height);
 
-        // Realistic Sun in the upper-left sky
         const sunX = width * 0.17;
         const sunY = Math.max(40, earthCenterY - 120);
         const sunR = 16;
@@ -400,14 +718,81 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           sunY,
           sunR * 11
         );
-        outerSolarScatter.addColorStop(0, 'rgba(254, 240, 138, 0.68)');
-        outerSolarScatter.addColorStop(0.32, 'rgba(251, 191, 36, 0.28)');
-        outerSolarScatter.addColorStop(0.68, 'rgba(125, 211, 252, 0.14)');
+        outerSolarScatter.addColorStop(
+          0,
+          activeThemeId === 'sand' ? 'rgba(251, 191, 36, 0.65)' : 'rgba(254, 240, 138, 0.68)'
+        );
+        outerSolarScatter.addColorStop(
+          0.32,
+          activeThemeId === 'sand' ? 'rgba(234, 88, 12, 0.24)' : 'rgba(251, 191, 36, 0.28)'
+        );
+        outerSolarScatter.addColorStop(
+          0.68,
+          activeThemeId === 'sand' ? 'rgba(253, 230, 138, 0.12)' : 'rgba(125, 211, 252, 0.14)'
+        );
         outerSolarScatter.addColorStop(1, 'rgba(248, 250, 252, 0)');
         ctx.fillStyle = outerSolarScatter;
         ctx.beginPath();
         ctx.arc(sunX, sunY, sunR * 11, 0, Math.PI * 2);
         ctx.fill();
+
+        if (activeThemeId === 'sand') {
+          // 🏜️ SICAK KUM: Ornate Compass Rose / Astrolabe Sunburst Rays around the Desert Sun
+          ctx.save();
+          ctx.translate(sunX, sunY);
+          ctx.rotate(timeTick * 0.15);
+          ctx.strokeStyle = 'rgba(217, 119, 6, 0.35)';
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.arc(0, 0, sunR * 1.65, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(0, 0, sunR * 2.35, 0, Math.PI * 2);
+          ctx.stroke();
+
+          for (let rIdx = 0; rIdx < 12; rIdx++) {
+            const ang = (rIdx * Math.PI) / 6;
+            const inner = sunR * 1.25;
+            const outer = rIdx % 3 === 0 ? sunR * 2.85 : sunR * 2.15;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(ang) * inner, Math.sin(ang) * inner);
+            ctx.lineTo(Math.cos(ang) * outer, Math.sin(ang) * outer);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // Warm golden desert breeze waves in upper-right sky
+          ctx.save();
+          ctx.strokeStyle = 'rgba(217, 119, 6, 0.18)';
+          ctx.lineWidth = 1.5;
+          for (let d = 0; d < 2; d++) {
+            ctx.beginPath();
+            const startX = width * 0.68;
+            const baseY = 36 + d * 14;
+            for (let x = 0; x <= 90; x += 6) {
+              const y = baseY + Math.sin(x * 0.08 - timeTick * 1.5 + d) * 3.5;
+              if (x === 0) ctx.moveTo(startX + x, y);
+              else ctx.lineTo(startX + x, y);
+            }
+            ctx.stroke();
+          }
+          ctx.restore();
+        } else {
+          // ☀️ GÜNDÜZ AÇIK: Soft drifting cumulus clouds in upper-right sky
+          const drawSoftCloud = (cx: number, cy: number, scale: number, alpha: number) => {
+            ctx.save();
+            ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 12 * scale, 0, Math.PI * 2);
+            ctx.arc(cx + 10 * scale, cy - 3 * scale, 14 * scale, 0, Math.PI * 2);
+            ctx.arc(cx + 22 * scale, cy + 1 * scale, 11 * scale, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          };
+          const drift = Math.sin(timeTick * 0.35) * 8;
+          drawSoftCloud(width * 0.76 + drift, Math.max(36, earthCenterY - 124), 0.95, 0.72);
+          drawSoftCloud(width * 0.85 - drift * 0.6, Math.max(58, earthCenterY - 96), 0.7, 0.52);
+        }
 
         // Mid solar corona
         const midCorona = ctx.createRadialGradient(
@@ -416,7 +801,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           sunR * 0.2,
           sunX,
           sunY,
-          sunR * 3.6
+          sunR * 3.4
         );
         midCorona.addColorStop(0, 'rgba(255, 255, 255, 0.96)');
         midCorona.addColorStop(0.35, 'rgba(254, 240, 138, 0.72)');
@@ -424,14 +809,14 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         midCorona.addColorStop(1, 'rgba(251, 191, 36, 0)');
         ctx.fillStyle = midCorona;
         ctx.beginPath();
-        ctx.arc(sunX, sunY, sunR * 3.6, 0, Math.PI * 2);
+        ctx.arc(sunX, sunY, sunR * 3.4, 0, Math.PI * 2);
         ctx.fill();
 
         // Crisp bright solar disc
         const sunDisc = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR);
         sunDisc.addColorStop(0, '#FFFFFF');
-        sunDisc.addColorStop(0.65, '#FEF08A');
-        sunDisc.addColorStop(1, 'rgba(250, 204, 21, 0.9)');
+        sunDisc.addColorStop(0.65, activeThemeId === 'sand' ? '#FDE68A' : '#FEF08A');
+        sunDisc.addColorStop(1, activeThemeId === 'sand' ? '#F59E0B' : 'rgba(250, 204, 21, 0.9)');
         ctx.fillStyle = sunDisc;
         ctx.beginPath();
         ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
@@ -452,9 +837,11 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       ro.disconnect();
       window.removeEventListener('resize', updateSize);
     };
-  }, [isDarkTheme]);
+  }, [isDarkTheme, activeThemeId, themePreset]);
 
-  // 2. Three.js 3D Earth (Real NASA Seamless Textures with Feathered Atmosphere)
+  // ============================================================================
+  // 2. THREE.JS 3D GLOBE & THEME-SPECIFIC 3D ORBITAL ARTIFACTS
+  // ============================================================================
   useEffect(() => {
     const container = earthStageRef.current;
     if (!container) return;
@@ -485,6 +872,8 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     renderer.setSize(width, height);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
     renderer.domElement.style.outline = 'none';
     renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.position = 'relative';
@@ -493,40 +882,110 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       'cursor-grab active:cursor-grabbing select-none transition-all block w-full h-full';
     container.appendChild(renderer.domElement);
 
-    const { dayTexture, nightTexture, bumpTexture, cloudTexture } = getEarthTextures();
+    // Studio Environment Reflection for metallic/crystal 3D orbital artifacts
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const envTarget = pmremGenerator.fromScene(new RoomEnvironment(), 0.04);
+    scene.environment = envTarget.texture;
+    pmremGenerator.dispose();
+
+    const { dayTexture, nightTexture, bumpTexture, cloudTexture, waterTexture } =
+      getEarthTextures();
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
     dayTexture.anisotropy = maxAnisotropy;
     nightTexture.anisotropy = maxAnisotropy;
     cloudTexture.anisotropy = maxAnisotropy;
 
+    // Warm/Cool Lighting Rig
+    const hemiLight = new THREE.HemisphereLight(
+      themePreset.earthRimHex,
+      themePreset.earthAtmosphereHex,
+      isDarkTheme ? 0.55 : 0.85
+    );
+    scene.add(hemiLight);
+
     const ambientLight = new THREE.AmbientLight(
       isDarkTheme ? 0xe2e8f0 : 0xffffff,
-      isDarkTheme ? 0.9 : 1.25
+      isDarkTheme ? 0.75 : 1.05
     );
     scene.add(ambientLight);
 
     const sunLight = new THREE.DirectionalLight(
       isDarkTheme ? 0xfef9c3 : 0xfff7ed,
-      isDarkTheme ? 1.5 : 2.1
+      isDarkTheme ? 1.55 : 2.1
     );
     sunLight.position.set(isDarkTheme ? 2.5 : -2.5, 1.8, 2.8);
     scene.add(sunLight);
 
-    // At Z=2.82, FOV=45 in a 332x332 stage (half-size = 166px):
-    // earthRadius=0.99 projects to r=150.2px (300.4px diameter)
-    // SVG rim & progress arc sit at r=153px (306px diameter, hugging the outside of the globe)
-    // atmosphereRadius=1.054 projects to r=161.5px (< 166px canvas edge, zero top/bottom clipping)
+    // Theme-Specific Globe Surface Configuration
     const earthRadius = 0.99;
     const earthGeometry = new THREE.SphereGeometry(earthRadius, 64, 64);
+
+    let globeBaseMap = isDarkTheme ? nightTexture : dayTexture;
+    let globeTint = new THREE.Color(0xffffff);
+    let globeEmissive = new THREE.Color(0xffdfa3);
+    let globeEmissiveIntensity = isDarkTheme ? 0.92 : 0;
+    let globeRoughness = isDarkTheme ? 0.72 : 0.55;
+    let globeMetalness = 0.08;
+    let cloudTint = new THREE.Color(0xffffff);
+    let cloudOpacity = isDarkTheme ? 0.2 : 0.38;
+
+    if (activeThemeId === 'emerald') {
+      globeTint = new THREE.Color(0xd1fae5);
+      globeEmissive = new THREE.Color(0x10b981);
+      globeEmissiveIntensity = 1.15;
+      cloudTint = new THREE.Color(0xa7f3d0);
+      cloudOpacity = 0.24;
+    } else if (activeThemeId === 'ocean') {
+      globeBaseMap = dayTexture;
+      globeTint = new THREE.Color(0x38bdf8);
+      globeEmissive = new THREE.Color(0x06b6d4);
+      globeEmissiveIntensity = 0.85;
+      globeRoughness = 0.38;
+      globeMetalness = 0.22;
+      cloudTint = new THREE.Color(0xbae6fd);
+      cloudOpacity = 0.28;
+    } else if (activeThemeId === 'sunset') {
+      globeBaseMap = dayTexture;
+      globeTint = new THREE.Color(0xfdba74);
+      globeEmissive = new THREE.Color(0xf97316);
+      globeEmissiveIntensity = 0.95;
+      globeRoughness = 0.65;
+      cloudTint = new THREE.Color(0xfde68a);
+      cloudOpacity = 0.24;
+    } else if (activeThemeId === 'amethyst') {
+      globeTint = new THREE.Color(0xe9d5ff);
+      globeEmissive = new THREE.Color(0xc084fc);
+      globeEmissiveIntensity = 1.15;
+      cloudTint = new THREE.Color(0xf5d0fe);
+      cloudOpacity = 0.22;
+    } else if (activeThemeId === 'amoled') {
+      globeTint = new THREE.Color(0x64748b);
+      globeEmissive = new THREE.Color(0xf43f5e);
+      globeEmissiveIntensity = 1.25;
+      globeRoughness = 0.82;
+      cloudOpacity = 0.12;
+    } else if (activeThemeId === 'sand') {
+      globeBaseMap = dayTexture;
+      globeTint = new THREE.Color(0xfde68a);
+      globeEmissive = new THREE.Color(0xd97706);
+      globeEmissiveIntensity = 0.12;
+      globeRoughness = 0.48;
+      globeMetalness = 0.18;
+      cloudTint = new THREE.Color(0xfef3c7);
+      cloudOpacity = 0.32;
+    }
+
     const earthMaterial = new THREE.MeshStandardMaterial({
-      map: isDarkTheme ? nightTexture : dayTexture,
+      map: globeBaseMap,
+      color: globeTint,
       bumpMap: bumpTexture,
-      bumpScale: 0.022,
-      roughness: isDarkTheme ? 0.72 : 0.58,
-      metalness: 0.08,
-      emissive: isDarkTheme ? new THREE.Color(0xffdfa3) : new THREE.Color(0x000000),
+      bumpScale: 0.024,
+      roughnessMap: activeThemeId === 'ocean' || !isDarkTheme ? waterTexture : null,
+      roughness: globeRoughness,
+      metalness: globeMetalness,
+      emissive: globeEmissive,
       emissiveMap: isDarkTheme ? nightTexture : null,
-      emissiveIntensity: isDarkTheme ? 0.92 : 0,
+      emissiveIntensity: globeEmissiveIntensity,
     });
     const earthMesh = new THREE.Mesh(earthGeometry, earthMaterial);
     earthMesh.rotation.y = -2.1;
@@ -536,8 +995,9 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     const cloudGeometry = new THREE.SphereGeometry(earthRadius * 1.012, 64, 64);
     const cloudMaterial = new THREE.MeshStandardMaterial({
       map: cloudTexture,
+      color: cloudTint,
       transparent: true,
-      opacity: isDarkTheme ? 0.2 : 0.38,
+      opacity: cloudOpacity,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
@@ -546,7 +1006,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     cloudMesh.rotation.x = 0.18;
     scene.add(cloudMesh);
 
-    // Feathered Outer Atmosphere Glow (fades smoothly to 0 before the 166px canvas border)
+    // Feathered Outer Atmosphere Glow
     const atmosphereRadius = earthRadius * 1.065;
     const atmosphereGeometry = new THREE.SphereGeometry(atmosphereRadius, 64, 64);
     const atmosphereMaterial = new THREE.ShaderMaterial({
@@ -576,9 +1036,9 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         }
       `,
       uniforms: {
-        uColor: { value: new THREE.Color(isDarkTheme ? 0x6366f1 : 0x38bdf8) },
-        uRimColor: { value: new THREE.Color(isDarkTheme ? 0xe0e7ff : 0xfef9c3) },
-        uMaxAlpha: { value: isDarkTheme ? 0.22 : 0.24 },
+        uColor: { value: new THREE.Color(themePreset.earthAtmosphereHex) },
+        uRimColor: { value: new THREE.Color(themePreset.earthRimHex) },
+        uMaxAlpha: { value: isDarkTheme ? 0.25 : 0.24 },
       },
       blending: THREE.AdditiveBlending,
       side: THREE.BackSide,
@@ -588,13 +1048,521 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     const atmosphereMesh = new THREE.Mesh(atmosphereGeometry, atmosphereMaterial);
     scene.add(atmosphereMesh);
 
+    // =========================================================================
+    // 3. BUILD THEME-SPECIFIC 3D ORBITAL / PLANETARY ARTIFACTS (`artifactGroup`)
+    // =========================================================================
+    const artifactGroup = new THREE.Group();
+    scene.add(artifactGroup);
+
+    const disposableGeometries: THREE.BufferGeometry[] = [];
+    const disposableMaterials: THREE.Material[] = [];
+    const registerGeo = <T extends THREE.BufferGeometry>(g: T): T => {
+      disposableGeometries.push(g);
+      return g;
+    };
+    const registerMat = <T extends THREE.Material>(m: T): T => {
+      disposableMaterials.push(m);
+      return m;
+    };
+
+    let customUpdateArtifact: ((elapsed: number) => void) | null = null;
+
+    if (activeThemeId === 'dark' || activeThemeId === 'light') {
+      // 🛰️ COMPOSITE 3D ORBITING SATELLITE & INCLINED TELEMETRY RING
+      const orbitPivot = new THREE.Group();
+      orbitPivot.rotation.z = activeThemeId === 'dark' ? 0.42 : -0.36;
+      orbitPivot.rotation.x = 0.28;
+      artifactGroup.add(orbitPivot);
+
+      // Thin orbital trajectory ring hugging the globe (r=1.032)
+      const trackMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: activeThemeId === 'dark' ? 0x818cf8 : 0x38bdf8,
+          transparent: true,
+          opacity: 0.28,
+        })
+      );
+      const trackMesh = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.032, 0.003, 12, 96)),
+        trackMat
+      );
+      trackMesh.rotation.x = Math.PI / 2;
+      orbitPivot.add(trackMesh);
+
+      // Composite 6-part 3D Satellite Group
+      const satGroup = new THREE.Group();
+      const bodyMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: activeThemeId === 'dark' ? 0xfbbf24 : 0xf8fafc,
+          metalness: 0.85,
+          roughness: 0.22,
+        })
+      );
+      const panelMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: activeThemeId === 'dark' ? 0x1d4ed8 : 0x0284c7,
+          metalness: 0.65,
+          roughness: 0.25,
+          emissive: 0x0ea5e9,
+          emissiveIntensity: 0.25,
+        })
+      );
+      const dishMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xe2e8f0,
+          metalness: 0.9,
+          roughness: 0.18,
+        })
+      );
+
+      // 1. Hexagonal satellite bus
+      const bus = new THREE.Mesh(
+        registerGeo(new THREE.CylinderGeometry(0.022, 0.022, 0.048, 6)),
+        bodyMat
+      );
+      bus.rotation.z = Math.PI / 2;
+      satGroup.add(bus);
+
+      // 2 & 3. Left & Right Solar Wing Panels
+      const wingGeo = registerGeo(new THREE.BoxGeometry(0.004, 0.085, 0.028));
+      const leftWing = new THREE.Mesh(wingGeo, panelMat);
+      leftWing.position.y = 0.056;
+      satGroup.add(leftWing);
+
+      const rightWing = new THREE.Mesh(wingGeo, panelMat);
+      rightWing.position.y = -0.056;
+      satGroup.add(rightWing);
+
+      // 4. Parabolic dish facing Earth
+      const dish = new THREE.Mesh(
+        registerGeo(new THREE.ConeGeometry(0.018, 0.014, 16, 1, true)),
+        dishMat
+      );
+      dish.position.x = -0.028;
+      dish.rotation.z = -Math.PI / 2;
+      satGroup.add(dish);
+
+      // 5. Beacon light
+      const beaconMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: activeThemeId === 'dark' ? 0xf43f5e : 0x10b981,
+        })
+      );
+      const beacon = new THREE.Mesh(
+        registerGeo(new THREE.SphereGeometry(0.008, 8, 8)),
+        beaconMat
+      );
+      beacon.position.x = 0.028;
+      satGroup.add(beacon);
+
+      orbitPivot.add(satGroup);
+
+      customUpdateArtifact = (elapsed) => {
+        const angle = elapsed * 0.55;
+        const r = 1.032;
+        satGroup.position.set(Math.cos(angle) * r, 0, Math.sin(angle) * r);
+        satGroup.lookAt(0, 0, 0);
+      };
+    } else if (activeThemeId === 'emerald') {
+      // 🌌 112 ZÜMRÜT: 3D Polar Aurora Borealis Crowns + Emergency Pulse Ring
+      const auroraShaderMat = registerMat(
+        new THREE.ShaderMaterial({
+          vertexShader: `
+            varying vec2 vUv;
+            uniform float uTime;
+            void main() {
+              vUv = uv;
+              vec3 pos = position;
+              float wave = sin(uv.x * 18.0 + uTime * 2.2) * 0.014;
+              pos.x += normal.x * wave;
+              pos.z += normal.z * wave;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            }
+          `,
+          fragmentShader: `
+            varying vec2 vUv;
+            uniform float uTime;
+            void main() {
+              float verticalFade = sin(vUv.y * 3.14159);
+              float curtains = 0.55 + 0.45 * sin(vUv.x * 28.0 + uTime * 1.8) * cos(vUv.x * 12.0 - uTime);
+              vec3 col1 = vec3(0.06, 0.72, 0.50);
+              vec3 col2 = vec3(0.20, 0.83, 0.60);
+              vec3 col = mix(col1, col2, vUv.y);
+              float alpha = verticalFade * curtains * 0.52;
+              gl_FragColor = vec4(col, alpha);
+            }
+          `,
+          uniforms: {
+            uTime: { value: 0 },
+          },
+          transparent: true,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+
+      // North & South Polar Aurora Curtains attached to the globe's tilt
+      const northAurora = new THREE.Mesh(
+        registerGeo(new THREE.CylinderGeometry(0.54, 0.68, 0.16, 48, 1, true)),
+        auroraShaderMat
+      );
+      northAurora.position.y = 0.84;
+      earthMesh.add(northAurora);
+
+      const southAurora = new THREE.Mesh(
+        registerGeo(new THREE.CylinderGeometry(0.68, 0.54, 0.15, 48, 1, true)),
+        auroraShaderMat
+      );
+      southAurora.position.y = -0.84;
+      earthMesh.add(southAurora);
+
+      // Inclined 112 Emerald Rescue Beacon Ring
+      const pulsePivot = new THREE.Group();
+      pulsePivot.rotation.z = -0.32;
+      pulsePivot.rotation.x = 0.25;
+      artifactGroup.add(pulsePivot);
+
+      const ringMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: 0x10b981,
+          transparent: true,
+          opacity: 0.34,
+        })
+      );
+      const ringMesh = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.03, 0.004, 12, 96)),
+        ringMat
+      );
+      ringMesh.rotation.x = Math.PI / 2;
+      pulsePivot.add(ringMesh);
+
+      const nodeGeo = registerGeo(new THREE.OctahedronGeometry(0.02, 0));
+      const nodeMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0x6ee7b7,
+          emissive: 0x10b981,
+          emissiveIntensity: 0.9,
+          roughness: 0.15,
+          metalness: 0.8,
+        })
+      );
+      for (let i = 0; i < 4; i++) {
+        const node = new THREE.Mesh(nodeGeo, nodeMat);
+        const ang = (i * Math.PI) / 2;
+        node.position.set(Math.cos(ang) * 1.03, 0, Math.sin(ang) * 1.03);
+        pulsePivot.add(node);
+      }
+
+      customUpdateArtifact = (elapsed) => {
+        auroraShaderMat.uniforms.uTime.value = elapsed;
+        pulsePivot.rotation.y = elapsed * 0.38;
+      };
+    } else if (activeThemeId === 'ocean') {
+      // 🌊 OKYANUS MAVİSİ: Counter-Rotating Bioluminescent Hydro Rings & 3 Aqua Probes
+      const ring1Pivot = new THREE.Group();
+      ring1Pivot.rotation.z = 0.35;
+      ring1Pivot.rotation.x = 0.22;
+      artifactGroup.add(ring1Pivot);
+
+      const ring2Pivot = new THREE.Group();
+      ring2Pivot.rotation.z = -0.38;
+      ring2Pivot.rotation.x = 0.28;
+      artifactGroup.add(ring2Pivot);
+
+      const cyanRingMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: 0x22d3ee,
+          transparent: true,
+          opacity: 0.36,
+        })
+      );
+      const skyRingMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: 0x38bdf8,
+          transparent: true,
+          opacity: 0.26,
+        })
+      );
+
+      const r1 = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.028, 0.0045, 12, 96)),
+        cyanRingMat
+      );
+      r1.rotation.x = Math.PI / 2;
+      ring1Pivot.add(r1);
+
+      const r2 = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.036, 0.003, 12, 96)),
+        skyRingMat
+      );
+      r2.rotation.x = Math.PI / 2;
+      ring2Pivot.add(r2);
+
+      const probeGeo = registerGeo(new THREE.SphereGeometry(0.018, 16, 16));
+      const probeMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xe0f2fe,
+          emissive: 0x06b6d4,
+          emissiveIntensity: 1.1,
+          roughness: 0.1,
+          metalness: 0.5,
+        })
+      );
+      for (let i = 0; i < 3; i++) {
+        const probe = new THREE.Mesh(probeGeo, probeMat);
+        const ang = (i * Math.PI * 2) / 3;
+        probe.position.set(Math.cos(ang) * 1.028, 0, Math.sin(ang) * 1.028);
+        ring1Pivot.add(probe);
+      }
+
+      customUpdateArtifact = (elapsed) => {
+        ring1Pivot.rotation.y = elapsed * 0.45;
+        ring2Pivot.rotation.y = -elapsed * 0.32;
+      };
+    } else if (activeThemeId === 'sunset') {
+      // 🪐 KIZIL ŞAFAK: Saturn-Style Multi-Band Golden Planetary Rings & 2 Orbiting Moons
+      const saturnPivot = new THREE.Group();
+      saturnPivot.rotation.x = 1.18;
+      saturnPivot.rotation.y = 0.28;
+      artifactGroup.add(saturnPivot);
+
+      const ringSpecs: Array<[number, number, number, number]> = [
+        [1.015, 1.026, 0xfde68a, 0.52],
+        [1.029, 1.041, 0xf59e0b, 0.42],
+        [1.043, 1.049, 0xfb7185, 0.32],
+      ];
+
+      for (const [innerR, outerR, hex, alpha] of ringSpecs) {
+        const rMat = registerMat(
+          new THREE.MeshBasicMaterial({
+            color: hex,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: alpha,
+          })
+        );
+        const rMesh = new THREE.Mesh(
+          registerGeo(new THREE.RingGeometry(innerR, outerR, 96)),
+          rMat
+        );
+        saturnPivot.add(rMesh);
+      }
+
+      // 2 Orbiting Rocky Moons (Phobos & Deimos)
+      const moonMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xfed7aa,
+          bumpMap: bumpTexture,
+          bumpScale: 0.015,
+          roughness: 0.75,
+          metalness: 0.1,
+        })
+      );
+      const phobos = new THREE.Mesh(
+        registerGeo(new THREE.SphereGeometry(0.026, 16, 16)),
+        moonMat
+      );
+      const deimos = new THREE.Mesh(
+        registerGeo(new THREE.SphereGeometry(0.017, 16, 16)),
+        moonMat
+      );
+      artifactGroup.add(phobos);
+      artifactGroup.add(deimos);
+
+      customUpdateArtifact = (elapsed) => {
+        saturnPivot.rotation.z = elapsed * 0.2;
+        const a1 = elapsed * 0.55;
+        phobos.position.set(
+          Math.cos(a1) * 1.035,
+          Math.sin(a1) * 0.32,
+          Math.sin(a1) * 0.98
+        );
+        const a2 = -elapsed * 0.38 + 2.1;
+        deimos.position.set(
+          Math.cos(a2) * 1.04,
+          -Math.sin(a2) * 0.28,
+          Math.sin(a2) * 0.98
+        );
+      };
+    } else if (activeThemeId === 'amethyst') {
+      // 🔮 KOZMİK MOR: Dual Intersecting Gyroscopic Astrolabe Rings + 6 Floating Amethyst Crystals
+      const gyroA = new THREE.Group();
+      gyroA.rotation.z = 0.52;
+      artifactGroup.add(gyroA);
+
+      const gyroB = new THREE.Group();
+      gyroB.rotation.z = -0.52;
+      artifactGroup.add(gyroB);
+
+      const ringMatA = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xe9d5ff,
+          emissive: 0xa855f7,
+          emissiveIntensity: 0.75,
+          roughness: 0.2,
+          metalness: 0.85,
+        })
+      );
+      const ringMatB = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xf5d0fe,
+          emissive: 0xd946ef,
+          emissiveIntensity: 0.65,
+          roughness: 0.2,
+          metalness: 0.85,
+        })
+      );
+
+      const torusA = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.03, 0.004, 12, 96)),
+        ringMatA
+      );
+      torusA.rotation.x = Math.PI / 2;
+      gyroA.add(torusA);
+
+      const torusB = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.036, 0.0035, 12, 96)),
+        ringMatB
+      );
+      torusB.rotation.x = Math.PI / 2;
+      gyroB.add(torusB);
+
+      // 6 Floating Crystal Octahedrons
+      const crystalGeo = registerGeo(new THREE.OctahedronGeometry(0.022, 0));
+      const crystalMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xf3e8ff,
+          emissive: 0xc084fc,
+          emissiveIntensity: 0.95,
+          roughness: 0.1,
+          metalness: 0.9,
+        })
+      );
+      const crystals: THREE.Mesh[] = [];
+      for (let i = 0; i < 6; i++) {
+        const c = new THREE.Mesh(crystalGeo, crystalMat);
+        const ang = (i * Math.PI) / 3;
+        c.position.set(Math.cos(ang) * 1.03, 0, Math.sin(ang) * 1.03);
+        gyroA.add(c);
+        crystals.push(c);
+      }
+
+      customUpdateArtifact = (elapsed) => {
+        gyroA.rotation.y = elapsed * 0.42;
+        gyroB.rotation.y = -elapsed * 0.34;
+        gyroB.rotation.x = Math.sin(elapsed * 0.4) * 0.25;
+        for (const c of crystals) {
+          c.rotation.x = elapsed * 1.5;
+          c.rotation.y = elapsed * 1.2;
+        }
+      };
+    } else if (activeThemeId === 'amoled') {
+      // 🖤 OLED TAM SİYAH: Tactical Geodesic Wireframe Shell + Crimson Radar Sweep Ring
+      const geoWireMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: 0xf43f5e,
+          wireframe: true,
+          transparent: true,
+          opacity: 0.13,
+        })
+      );
+      const geoWireMesh = new THREE.Mesh(
+        registerGeo(new THREE.IcosahedronGeometry(earthRadius * 1.018, 3)),
+        geoWireMat
+      );
+      earthMesh.add(geoWireMesh);
+
+      const radarPivot = new THREE.Group();
+      radarPivot.rotation.z = 0.38;
+      radarPivot.rotation.x = 0.24;
+      artifactGroup.add(radarPivot);
+
+      const radarRingMat = registerMat(
+        new THREE.MeshBasicMaterial({
+          color: 0xf43f5e,
+          transparent: true,
+          opacity: 0.45,
+        })
+      );
+      const radarRing = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.032, 0.0035, 12, 96)),
+        radarRingMat
+      );
+      radarRing.rotation.x = Math.PI / 2;
+      radarPivot.add(radarRing);
+
+      const targetDot = new THREE.Mesh(
+        registerGeo(new THREE.SphereGeometry(0.016, 12, 12)),
+        registerMat(new THREE.MeshBasicMaterial({ color: 0xffffff }))
+      );
+      targetDot.position.set(1.032, 0, 0);
+      radarPivot.add(targetDot);
+
+      customUpdateArtifact = (elapsed) => {
+        radarPivot.rotation.y = elapsed * 0.65;
+      };
+    } else if (activeThemeId === 'sand') {
+      // 🏜️ SICAK KUM: Antique Brass Armillary Sphere / Compass Meridian & Equatorial Rings
+      const armillaryGroup = new THREE.Group();
+      armillaryGroup.rotation.z = 0.28;
+      armillaryGroup.rotation.x = 0.18;
+      artifactGroup.add(armillaryGroup);
+
+      const brassMat = registerMat(
+        new THREE.MeshStandardMaterial({
+          color: 0xf59e0b,
+          metalness: 0.88,
+          roughness: 0.22,
+          emissive: 0xd97706,
+          emissiveIntensity: 0.2,
+        })
+      );
+
+      // Equatorial Brass Ring
+      const eqRing = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.032, 0.005, 12, 96)),
+        brassMat
+      );
+      eqRing.rotation.x = Math.PI / 2;
+      armillaryGroup.add(eqRing);
+
+      // Meridian Brass Ring
+      const merRing = new THREE.Mesh(
+        registerGeo(new THREE.TorusGeometry(1.036, 0.004, 12, 96)),
+        brassMat
+      );
+      armillaryGroup.add(merRing);
+
+      // 8 Cardinal Brass Compass Studs along the Equatorial Ring
+      const studGeo = registerGeo(new THREE.BoxGeometry(0.018, 0.018, 0.018));
+      for (let i = 0; i < 8; i++) {
+        const stud = new THREE.Mesh(studGeo, brassMat);
+        const ang = (i * Math.PI) / 4;
+        stud.position.set(Math.cos(ang) * 1.032, 0, Math.sin(ang) * 1.032);
+        stud.rotation.y = -ang;
+        armillaryGroup.add(stud);
+      }
+
+      customUpdateArtifact = (elapsed) => {
+        armillaryGroup.rotation.y = elapsed * 0.24;
+      };
+    }
+
     let animationFrameId: number;
+    const clock = new THREE.Clock();
 
     const animate = () => {
+      const elapsed = clock.getElapsedTime();
+
       if (!isDraggingRef.current) {
         earthMesh.rotation.y += 0.0009 + dragVelocityRef.current;
         cloudMesh.rotation.y += 0.0012 + dragVelocityRef.current;
         dragVelocityRef.current *= 0.94;
+      }
+
+      if (customUpdateArtifact) {
+        customUpdateArtifact(elapsed);
       }
 
       renderer.render(scene, camera);
@@ -627,6 +1595,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       const spinDelta = deltaX * 0.009;
       earthMesh.rotation.y += spinDelta;
       cloudMesh.rotation.y += spinDelta * 1.1;
+      artifactGroup.rotation.y += spinDelta * 0.65;
       dragVelocityRef.current = spinDelta;
     };
 
@@ -652,17 +1621,18 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       cloudMaterial.dispose();
       atmosphereGeometry.dispose();
       atmosphereMaterial.dispose();
+      for (const g of disposableGeometries) g.dispose();
+      for (const m of disposableMaterials) m.dispose();
+      envTarget.dispose();
       renderer.dispose();
       if (domElement.parentElement) {
         domElement.parentElement.removeChild(domElement);
       }
     };
-  }, [isDarkTheme, isLight]);
+  }, [isDarkTheme, isLight, activeThemeId, themePreset]);
 
   const progressPct = Math.min(100, Math.max(0, Math.round(progressFrac * 100)));
 
-  // In the 332x332 SVG viewBox (center 166,166), Earth surface is at r=150.2px.
-  // Placing the rim circle & bottom progress arc at r=153 hugs the outer edge of the globe!
   const arcRadius = 153;
   const arcLength = 267.04;
   const arcOffset = arcLength * (1 - Math.min(1, Math.max(0, progressFrac)));
@@ -696,14 +1666,14 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           cy="166"
           r={arcRadius}
           fill="none"
-          stroke={isDarkTheme ? 'rgba(99, 102, 241, 0.22)' : 'rgba(14, 165, 233, 0.26)'}
+          stroke={themePreset.earthCircleStroke}
           strokeWidth="1.5"
         />
         {/* Bottom Progress Track (from bottom-left 140° to bottom-right 40° along r=153) */}
         <path
           d="M 48.8 264.4 A 153 153 0 0 0 283.2 264.4"
           fill="none"
-          stroke={!isLight ? 'rgba(255, 255, 255, 0.14)' : 'rgba(15, 23, 42, 0.14)'}
+          stroke={isDarkTheme ? 'rgba(255, 255, 255, 0.14)' : 'rgba(15, 23, 42, 0.14)'}
           strokeWidth="4"
           strokeLinecap="round"
         />
@@ -712,7 +1682,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
           <path
             d="M 48.8 264.4 A 153 153 0 0 0 283.2 264.4"
             fill="none"
-            stroke="#f43f5e"
+            stroke={themePreset.accentHex}
             strokeWidth="4.5"
             strokeLinecap="round"
             strokeDasharray={arcLength}
@@ -725,7 +1695,10 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       <div className="absolute inset-0 z-30 flex flex-col items-center justify-center text-center px-5 pointer-events-none">
         {/* 1. Eyebrow Status Capsule */}
         <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-slate-950/65 backdrop-blur-md border border-white/20 shadow-md">
-          <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
+          <span
+            className="w-2 h-2 rounded-full shrink-0"
+            style={{ backgroundColor: themePreset.accentHex }}
+          />
           <span className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-white leading-normal">
             ŞU AN NÖBETTE
           </span>
@@ -771,7 +1744,9 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
             className="mt-2 inline-flex items-center gap-1.5 text-xs tracking-wide tabular-nums leading-normal"
             style={{ textShadow: '0 2px 10px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.95)' }}
           >
-            <span className="font-extrabold text-rose-300">%{progressPct}</span>
+            <span className="font-extrabold" style={{ color: themePreset.accentHex }}>
+              %{progressPct}
+            </span>
             <span className="text-white/60">•</span>
             <span className="font-bold text-white">{remainText}</span>
           </div>

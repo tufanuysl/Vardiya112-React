@@ -1,4 +1,12 @@
-import { AppSettings, NoteItem, RefRecord, ShiftPresetOption } from './types';
+import {
+  AppSettings,
+  NoteItem,
+  ProfileAvatarColor,
+  ProfileGroupMatchResult,
+  RefRecord,
+  ShiftPresetOption,
+  UserProfile,
+} from './types';
 
 export const SHIFT_PRESETS: ShiftPresetOption[] = [
   {
@@ -105,6 +113,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   groupNames: ['1. Grup', '2. Grup', '3. Grup', '4. Grup', '5. Grup'],
   groupMembers: ['', '', '', '', ''],
   theme: 'dark',
+  defaultStartTab: 'home',
   reminderMinutesBefore: 30,
   notificationSound: 'chime',
 };
@@ -115,6 +124,29 @@ const PREF_KEY_SETTINGS = 'VARDIYA_112_SETTINGS';
 const PREF_KEY_REFS = 'VARDIYA_112_REFS';
 const PREF_KEY_NOTES = 'VARDIYA_112_NOTES';
 const PREF_KEY_CONFIGURED = 'VARDIYA_112_CONFIGURED';
+
+export const formatTitleCaseTR = (str: string): string => {
+  if (!str) return '';
+  return str
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(
+      (word) =>
+        word.charAt(0).toLocaleUpperCase('tr-TR') +
+        word.slice(1).toLocaleLowerCase('tr-TR')
+    )
+    .join(' ');
+};
+
+export const formatMemberListTitleCaseTR = (rawMembers: string): string => {
+  if (!rawMembers) return '';
+  return rawMembers
+    .split(/[,;\n]+/)
+    .map((entry) => formatTitleCaseTR(entry))
+    .filter(Boolean)
+    .join(', ');
+};
 
 export const loadStoredSettings = (): AppSettings => {
   try {
@@ -141,7 +173,7 @@ export const loadStoredSettings = (): AppSettings => {
           : DEFAULT_SETTINGS.groupNames,
       groupMembers:
         Array.isArray(parsed.groupMembers) && parsed.groupMembers.length > 0
-          ? parsed.groupMembers
+          ? parsed.groupMembers.map((m: string) => formatMemberListTitleCaseTR(m || ''))
           : DEFAULT_SETTINGS.groupMembers,
     };
   } catch {
@@ -226,7 +258,190 @@ export const resetAllStorage = (): void => {
     localStorage.removeItem(PREF_KEY_REFS);
     localStorage.removeItem(PREF_KEY_NOTES);
     localStorage.removeItem(PREF_KEY_CONFIGURED);
+    localStorage.removeItem(PREF_KEY_PROFILES);
+    localStorage.removeItem(PREF_KEY_ACTIVE_PROFILE_ID);
   } catch (e) {
     console.error('Failed to reset storage', e);
   }
 };
+
+const PREF_KEY_PROFILES = 'VARDIYA_112_PROFILES';
+const PREF_KEY_ACTIVE_PROFILE_ID = 'VARDIYA_112_ACTIVE_PROFILE_ID';
+
+export const AVATAR_COLORS: ProfileAvatarColor[] = ['emerald', 'sky', 'amber', 'rose', 'indigo'];
+
+export const normalizeTurkishText = (str: string): string => {
+  return (str || '')
+    .trim()
+    .toLocaleLowerCase('tr-TR')
+    .replace(/ı/g, 'i')
+    .replace(/ğ/g, 'g')
+    .replace(/ü/g, 'u')
+    .replace(/ş/g, 's')
+    .replace(/ö/g, 'o')
+    .replace(/ç/g, 'c')
+    .replace(/\s+/g, ' ');
+};
+
+export const findMatchingGroupByName = (
+  personName: string,
+  groupMembers: string[],
+  groupNames: string[]
+): ProfileGroupMatchResult | null => {
+  const queryNorm = normalizeTurkishText(personName);
+  if (!queryNorm || queryNorm.length < 2) return null;
+
+  const queryTokens = queryNorm.split(' ').filter((t) => t.length >= 2);
+  if (queryTokens.length === 0) return null;
+
+  let partialCandidate: ProfileGroupMatchResult | null = null;
+
+  for (let i = 0; i < groupMembers.length; i++) {
+    const rawGroup = groupMembers[i] || '';
+    const entries = rawGroup
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    for (const entry of entries) {
+      const entryNorm = normalizeTurkishText(entry);
+      if (!entryNorm) continue;
+
+      // 1. Exact full match
+      if (entryNorm === queryNorm) {
+        return {
+          groupIdx: i,
+          groupName: groupNames[i] || `${i + 1}. Grup`,
+          matchedMemberName: entry,
+          confidence: 'exact',
+        };
+      }
+
+      const entryTokens = entryNorm.split(' ').filter(Boolean);
+
+      // 2. First name or full token match (e.g. "Tufan" matches "Tufan Uysal", or "Tufan Uysal" matches "Tufan")
+      const allQueryTokensInEntry = queryTokens.every((qt) =>
+        entryTokens.some((et) => et === qt || (qt.length >= 3 && et.startsWith(qt)))
+      );
+      const allEntryTokensInQuery =
+        entryTokens.length > 0 &&
+        entryTokens.every((et) => queryTokens.some((qt) => qt === et));
+
+      if (allQueryTokensInEntry || allEntryTokensInQuery) {
+        if (!partialCandidate) {
+          partialCandidate = {
+            groupIdx: i,
+            groupName: groupNames[i] || `${i + 1}. Grup`,
+            matchedMemberName: entry,
+            confidence: entryTokens[0] === queryTokens[0] ? 'exact' : 'partial',
+          };
+        }
+      }
+    }
+  }
+
+  return partialCandidate;
+};
+
+export const ensureMemberInGroupList = (
+  memberName: string,
+  targetGroupIdx: number,
+  groupMembers: string[],
+  numGroups: number
+): string[] => {
+  const cleanName = formatTitleCaseTR(memberName || '');
+  const nextMembers = [...groupMembers].map((m) => formatMemberListTitleCaseTR(m || ''));
+  while (nextMembers.length < numGroups) nextMembers.push('');
+
+  if (!cleanName || targetGroupIdx < 0 || targetGroupIdx >= numGroups) {
+    return nextMembers;
+  }
+
+  const targetNorm = normalizeTurkishText(cleanName);
+  const currentEntries = (nextMembers[targetGroupIdx] || '')
+    .split(',')
+    .map((s) => formatTitleCaseTR(s))
+    .filter(Boolean);
+
+  const alreadyExists = currentEntries.some((entry) => {
+    const eNorm = normalizeTurkishText(entry);
+    return eNorm === targetNorm || eNorm.split(' ')[0] === targetNorm.split(' ')[0];
+  });
+
+  if (!alreadyExists) {
+    currentEntries.push(cleanName);
+    nextMembers[targetGroupIdx] = currentEntries.join(', ');
+  }
+
+  return nextMembers;
+};
+
+export const loadStoredProfiles = (
+  currentSettings: AppSettings,
+  currentRefs: RefRecord[],
+  currentNotes: NoteItem[]
+): UserProfile[] => {
+  try {
+    const raw = localStorage.getItem(PREF_KEY_PROFILES);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch {
+    // fallback below
+  }
+
+  // Bootstrap initial default profile from existing refHistory/settings
+  const initialGroupIdx = currentRefs.length > 0 ? currentRefs[0].myGroupIdx : 0;
+  const firstGroupMembers = (currentSettings.groupMembers[initialGroupIdx] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const defaultName = firstGroupMembers[0] || 'Ana Profilim';
+
+  const defaultProfile: UserProfile = {
+    id: 'profile-default',
+    name: defaultName,
+    role: '112 Personeli',
+    avatarColor: 'emerald',
+    groupIdx: initialGroupIdx,
+    isGroupConfirmed: currentRefs.length > 0,
+    matchedSource: currentRefs.length > 0 ? 'Mevcut Kurulum' : undefined,
+    refHistory: currentRefs,
+    notes: currentNotes,
+    createdAt: new Date().toISOString(),
+  };
+
+  return [defaultProfile];
+};
+
+export const saveStoredProfiles = (profiles: UserProfile[]): void => {
+  try {
+    localStorage.setItem(PREF_KEY_PROFILES, JSON.stringify(profiles));
+  } catch (e) {
+    console.error('Failed to save profiles', e);
+  }
+};
+
+export const loadActiveProfileId = (profiles: UserProfile[]): string => {
+  try {
+    const savedId = localStorage.getItem(PREF_KEY_ACTIVE_PROFILE_ID);
+    if (savedId && profiles.some((p) => p.id === savedId)) {
+      return savedId;
+    }
+  } catch {
+    // ignore
+  }
+  return profiles[0]?.id || 'profile-default';
+};
+
+export const saveActiveProfileId = (id: string): void => {
+  try {
+    localStorage.setItem(PREF_KEY_ACTIVE_PROFILE_ID, id);
+  } catch (e) {
+    console.error('Failed to save active profile id', e);
+  }
+};
+

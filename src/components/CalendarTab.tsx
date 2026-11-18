@@ -9,6 +9,7 @@ import {
 } from '../shiftEngine';
 import { ChevronLeft, ChevronRight, Download, Share2, Copy, Check } from 'lucide-react';
 import { useShare } from '../hooks/useShare';
+import { getThemePreset } from '../themes';
 
 interface CalendarTabProps {
   settings: AppSettings;
@@ -62,7 +63,8 @@ export const CalendarTab: React.FC<CalendarTabProps> = ({
   onDutyDateChange,
   onResetLive,
 }) => {
-  const isLight = settings.theme === 'light';
+  const themePreset = getThemePreset(settings.theme);
+  const isLight = themePreset.isLight;
   const nowDate = new Date();
   const todayISO = toISODate(nowDate);
   const isCurrentMonth =
@@ -237,24 +239,62 @@ export const CalendarTab: React.FC<CalendarTabProps> = ({
     };
   }, [calendarYear, calendarMonth, calendarGroupIdx, settings, refHistory, notes, todayISO]);
 
-  const handleExportICS = () => {
+  const handleExportICS = async () => {
+    const targetGroup =
+      calendarGroupIdx === -2 ? -2 : calendarGroupIdx >= 0 ? calendarGroupIdx : -1;
     const icsContent = buildICSContent(
       calendarYear,
       calendarMonth,
-      calendarGroupIdx >= 0 ? calendarGroupIdx : -1,
+      targetGroup,
       settings,
       refHistory,
       notes
     );
-    const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+    const filename = `vardiya_${calendarYear}_${String(calendarMonth).padStart(2, '0')}.ics`;
+
+    try {
+      const response = await fetch('/api/calendar/ics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ icsContent, filename }),
+      });
+
+      if (response.ok) {
+        const data = (await response.json()) as {
+          downloadUrl?: string;
+          inlineUrl?: string;
+        };
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const targetUrl = isIOS ? data.inlineUrl || data.downloadUrl : data.downloadUrl;
+        if (targetUrl) {
+          const link = document.createElement('a');
+          link.href = targetUrl;
+          if (!isIOS) {
+            link.download = filename;
+          }
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          return;
+        }
+      }
+    } catch {
+      // Offline / fallback to clean text/calendar Blob below
+    }
+
+    // Strict 'text/calendar' (without ';charset=utf-8') so Android DownloadManager
+    // matches Google Calendar / System Calendar IntentFilter when opened
+    const blob = new Blob([icsContent], { type: 'text/calendar' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `vardiya_${calendarYear}_${String(calendarMonth).padStart(2, '0')}.ics`;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => {
+      URL.revokeObjectURL(url);
+    }, 60000);
   };
 
   const handleCopyMonthText = async () => {
@@ -747,9 +787,7 @@ export const CalendarTab: React.FC<CalendarTabProps> = ({
             }
 
             const highlightFrameClass = isHighlighted
-              ? isLight
-                ? 'border-2 !border-rose-500 ring-1 ring-rose-500/30 shadow-sm'
-                : 'border-2 !border-rose-500 ring-1 ring-rose-500/30 shadow-[0_0_14px_rgba(244,63,94,0.28)]'
+              ? themePreset.highlightFrameClass
               : 'border';
 
             const rawName = settings.groupNames[i] || `${i + 1}. Grup`;
@@ -766,7 +804,7 @@ export const CalendarTab: React.FC<CalendarTabProps> = ({
                 <span
                   className={`text-xs font-extrabold leading-none truncate max-w-full ${
                     isHighlighted
-                      ? 'text-rose-400'
+                      ? themePreset.highlightTextClass
                       : isLight
                       ? 'text-slate-800'
                       : 'text-white'
@@ -858,11 +896,7 @@ export const CalendarTab: React.FC<CalendarTabProps> = ({
 
       {/* 4. BOTTOM FILTER & MONTHLY SUMMARY CARD */}
       <div
-        className={`w-full rounded-3xl border p-2.5 flex flex-col gap-2 flex-shrink-0 no-share ${
-          isLight
-            ? 'bg-gradient-to-r from-rose-50/90 via-white to-rose-50/70 border-rose-200 shadow-sm'
-            : 'bg-gradient-to-r from-[#171320] via-[#21121f] to-[#2c121e] border-rose-500/30 shadow-lg'
-        }`}
+        className={`w-full rounded-3xl border p-2.5 flex flex-col gap-2 flex-shrink-0 no-share ${themePreset.summaryCardClass}`}
       >
         {/* Filter Pills */}
         <div className="flex items-center justify-between gap-1.5">

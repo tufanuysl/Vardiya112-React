@@ -4,17 +4,72 @@ import {
   parseHM,
   querySingleDayForGroup,
   getEffectiveGroupIdxForDate,
+  getEffectiveGroupMembersForShift,
   whoIsOnDutyAt,
   toISODate,
   createLocalDate,
+  addDays,
   trDateFormatter,
 } from '../shiftEngine';
 import { Real3DEarth } from './Real3DEarth';
+import { getThemePreset } from '../themes';
+
+const DAILY_DUTY_QUOTES: Array<{ text: string; tag: string }> = [
+  {
+    text: 'Bir hayat kurtarmak, bütün insanlığı yaşatmak gibidir.',
+    tag: 'Günün Sözü',
+  },
+  {
+    text: 'Zorluklar gece gibidir; sabırla görev yapanın ufku her zaman aydınlanır.',
+    tag: 'Nöbet Motivasyonu',
+  },
+  {
+    text: 'Sakin kalmak, en kritik anda en doğru kararı vermenin anahtarıdır.',
+    tag: '112 Ruhu',
+  },
+  {
+    text: 'İyi bir ekip, en uzun nöbeti bile güven ve huzurla kısaltır.',
+    tag: 'Ekip Ruhu',
+  },
+  {
+    text: 'Başkalarının en zor anında yanında olmak, en onurlu görevdir.',
+    tag: 'Görev Bilinci',
+  },
+  {
+    text: 'Dinlenmek vazgeçmek değil, yeni bir nöbete güç toplamaktır.',
+    tag: 'İstirahat & Denge',
+  },
+  {
+    text: 'Her siren sesi bir umut, her müdahale yeni bir başlangıçtır.',
+    tag: 'Acil Çağrı',
+  },
+  {
+    text: 'Geceyi aydınlatan yıldızlar değil, görev başında uyanık kalan yüreklerdir.',
+    tag: 'Gece Nöbeti',
+  },
+  {
+    text: 'Tecrübe, soğukkanlılıkla birleştiğinde imkânsız görüneni başarır.',
+    tag: 'Profesyonellik',
+  },
+  {
+    text: 'Zamanla yarışanların en büyük gücü, birbirine duyduğu güvendir.',
+    tag: 'Dayanışma',
+  },
+  {
+    text: 'Umut, en karanlık gecede bile nöbeti devralmaya hazır olmaktır.',
+    tag: 'Umut & Azim',
+  },
+  {
+    text: 'Bir tebessüm ve sakin bir ses tonu, en güçlü ilk yardımdır.',
+    tag: 'İnsan Odaklı',
+  },
+];
 
 interface HomeTabProps {
   settings: AppSettings;
   refHistory: RefRecord[];
   notes: NoteItem[];
+  activeProfileName?: string;
   dutyQueryDate: string;
   dutyQueryTime: string;
   isLiveDutyMode: boolean;
@@ -31,6 +86,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   settings,
   refHistory,
   notes,
+  activeProfileName,
   dutyQueryTime,
   isLiveDutyMode,
   onResetLive,
@@ -40,8 +96,10 @@ export const HomeTab: React.FC<HomeTabProps> = ({
   onOpenSettings,
 }) => {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState<number | null>(null);
+  const [quoteOffset, setQuoteOffset] = useState<number>(0);
 
-  const isLight = settings.theme === 'light';
+  const themePreset = getThemePreset(settings.theme);
+  const isLight = themePreset.isLight;
   const isConfigured = refHistory && refHistory.length > 0;
 
   const [h, m] = parseHM(dutyQueryTime);
@@ -100,35 +158,31 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     [singleQueryDate, settings, refHistory, notes]
   );
 
-  // Monthly statistics (Nöbet gün, Dinlenme gün, Toplam saat) for the user's own schedule
-  const monthlyStats = useMemo(() => {
-    const year = queryD.getFullYear();
-    const month = queryD.getMonth() + 1;
-    const daysInMonth = new Date(year, month, 0).getDate();
-
-    if (!isConfigured) {
-      return { dutyDays: 0, restDays: daysInMonth, totalHours: 0 };
-    }
-
-    let dutyDays = 0;
-    let totalHours = 0;
-
-    for (let d = 1; d <= daysInMonth; d++) {
-      const iso = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      const info = querySingleDayForGroup(iso, null, settings, refHistory, notes);
+  // Next upcoming shift & Daily Quote for the bottom card
+  const nextShiftText = useMemo(() => {
+    if (!isConfigured) return 'Kurulum bekleniyor';
+    for (let offset = 1; offset <= 14; offset++) {
+      const nextISO = toISODate(addDays(queryD, offset));
+      const info = querySingleDayForGroup(nextISO, null, settings, refHistory, notes);
       if (info.dayShift || info.nightShift) {
-        dutyDays++;
-        if (info.dayShift) totalHours += info.dayShift.durationHours;
-        if (info.nightShift) totalHours += info.nightShift.durationHours;
+        const typeLbl = settings.is24HourSystem
+          ? '24s'
+          : info.dayShift
+          ? '☀️ Gündüz'
+          : '🌙 Gece';
+        const dayLbl = offset === 1 ? 'Yarın' : `${offset} gün sonra`;
+        return `${dayLbl} • ${typeLbl}`;
       }
     }
-
-    return {
-      dutyDays,
-      restDays: Math.max(0, daysInMonth - dutyDays),
-      totalHours: Math.round(totalHours),
-    };
+    return 'Planlı nöbet yok';
   }, [queryD, settings, refHistory, notes, isConfigured]);
+
+  const activeQuote = useMemo(() => {
+    const daySeed =
+      queryD.getFullYear() * 372 + (queryD.getMonth() + 1) * 31 + queryD.getDate();
+    const idx = (daySeed + quoteOffset) % DAILY_DUTY_QUOTES.length;
+    return DAILY_DUTY_QUOTES[idx];
+  }, [queryD, quoteOffset]);
 
   // User's primary status text for the bottom split card (only the user's status, no extra description line)
   const { bigStatus, accentBarColor } = useMemo(() => {
@@ -184,7 +238,19 @@ export const HomeTab: React.FC<HomeTabProps> = ({
     };
   }, [myInfo, isConfigured]);
 
-  const activeGroupMembers = currentSh ? settings.groupMembers[currentSh.groupIdx] || '' : '';
+  const activeGroupMembers = useMemo(() => {
+    if (!currentSh) return '';
+    const shiftStartISO = toISODate(currentSh.startDT);
+    return getEffectiveGroupMembersForShift(
+      shiftStartISO,
+      currentSh.groupIdx,
+      currentSh.shiftType,
+      settings,
+      refHistory,
+      notes,
+      activeProfileName
+    ).membersText;
+  }, [currentSh, settings, refHistory, notes, activeProfileName]);
 
   const shiftLabel = !isConfigured
     ? 'Hazır'
@@ -205,6 +271,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           shiftType={shiftLabel}
           isNight={curIsNight}
           isLight={isLight}
+          themeId={settings.theme}
           members={isConfigured ? activeGroupMembers : ''}
           remainText={remainText}
           progressFrac={progressFrac}
@@ -230,7 +297,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
       </div>
 
       {/* 2. FIVE VERTICAL GROUP CARDS WITH EXPRESSIVE ICONS (1, 2, 3, 4, 5) */}
-      <div className="w-full max-w-sm mt-[15px]">
+      <div className="w-full max-w-sm mt-[15px] relative z-30">
         <div
           className="grid gap-2"
           style={{
@@ -274,9 +341,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             }
 
             const highlightFrameClass = isHighlighted
-              ? isLight
-                ? 'border-2 !border-rose-500 ring-1 ring-rose-500/30 shadow-sm'
-                : 'border-2 !border-rose-500 ring-1 ring-rose-500/30 shadow-[0_0_15px_rgba(244,63,94,0.28)]'
+              ? themePreset.highlightFrameClass
               : 'border';
 
             const rawName = settings.groupNames[i] || `${i + 1}. Grup`;
@@ -292,7 +357,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({
                 <span
                   className={`font-display text-[15px] font-extrabold tracking-tight leading-none truncate max-w-full ${
                     isHighlighted
-                      ? 'text-rose-400'
+                      ? themePreset.highlightTextClass
                       : isLight
                       ? 'text-slate-800'
                       : 'text-white'
@@ -313,36 +378,101 @@ export const HomeTab: React.FC<HomeTabProps> = ({
           })}
         </div>
 
-        {/* Inline Group Members Preview when any group box is tapped */}
-        {selectedGroupIdx !== null && selectedGroupIdx < settings.numGroups && (
-          <div
-            className={`mt-2 px-3 py-2 rounded-2xl border text-xs flex items-center justify-between animate-fade-in ${
-              isLight
-                ? 'bg-slate-100/95 border-slate-200 text-slate-800'
-                : 'bg-[#111622]/95 border-rose-500/30 text-slate-200'
-            }`}
-          >
-            <div className="flex items-center gap-1.5 truncate">
-              <span className="text-xs leading-none">👥</span>
-              <span className="font-bold text-rose-400 shrink-0">
-                {settings.groupNames[selectedGroupIdx] || `${selectedGroupIdx + 1}. Grup`}:
-              </span>
-              <span className={`truncate font-medium ${isLight ? 'text-slate-600' : 'text-slate-300'}`}>
-                {settings.groupMembers[selectedGroupIdx]?.trim() || 'Personel tanımlanmamış'}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setSelectedGroupIdx(null)}
-              className="text-[11px] font-bold text-slate-400 hover:text-rose-400 ml-2 shrink-0 cursor-pointer"
+        {/* Floating Group Members Popover when any group box is tapped (multi-line wrapped, no truncation, with Becayiş replacement) */}
+        {selectedGroupIdx !== null && selectedGroupIdx < settings.numGroups && (() => {
+          const selGroupInfo = querySingleDayForGroup(
+            singleQueryDate,
+            selectedGroupIdx,
+            settings,
+            refHistory,
+            []
+          );
+          const effDateISO = selGroupInfo.dayShift
+            ? singleQueryDate
+            : selGroupInfo.nightShift
+            ? singleQueryDate
+            : selGroupInfo.morningCarryover
+            ? toISODate(selGroupInfo.morningCarryover.startDT)
+            : singleQueryDate;
+          const effShiftType: 'GUNDUZ' | 'AKSAM' | null = selGroupInfo.dayShift
+            ? 'GUNDUZ'
+            : selGroupInfo.nightShift
+            ? 'AKSAM'
+            : selGroupInfo.morningCarryover
+            ? 'AKSAM'
+            : null;
+
+          const { memberItems } = getEffectiveGroupMembersForShift(
+            effDateISO,
+            selectedGroupIdx,
+            effShiftType,
+            settings,
+            refHistory,
+            notes,
+            activeProfileName
+          );
+
+          return (
+            <div
+              className={`absolute left-0 right-0 top-full mt-2 z-40 p-3 rounded-2xl border shadow-2xl backdrop-blur-md animate-fade-in flex flex-col gap-2 ${themePreset.popoverBorderClass}`}
             >
-              Kapat
-            </button>
-          </div>
-        )}
+              <div className="flex items-center justify-between gap-2 border-b pb-1.5 border-slate-500/15">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs leading-none">👥</span>
+                  <span className={`text-xs font-extrabold ${themePreset.highlightTextClass}`}>
+                    {settings.groupNames[selectedGroupIdx] || `${selectedGroupIdx + 1}. Grup`} Personelleri
+                  </span>
+                  {memberItems.length > 0 && (
+                    <span className="text-[10px] font-bold text-slate-400">
+                      ({memberItems.length} Kişi)
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedGroupIdx(null)}
+                  className="text-[11px] font-bold text-slate-400 hover:text-rose-400 px-1.5 py-0.5 rounded-lg cursor-pointer"
+                >
+                  Kapat ✕
+                </button>
+              </div>
+
+              {memberItems.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto pr-0.5">
+                  {memberItems.map((item, idx) => (
+                    <span
+                      key={`${item.name}-${idx}`}
+                      className={`px-2.5 py-1 rounded-xl text-[11.5px] font-semibold leading-snug break-words flex items-center gap-1 ${
+                        item.isSwappedIn
+                          ? isLight
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-300'
+                            : 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/40'
+                          : isLight
+                          ? 'bg-slate-100 text-slate-800 border border-slate-200/80'
+                          : 'bg-slate-800/90 text-slate-100 border border-slate-700/70'
+                      }`}
+                    >
+                      {item.isSwappedIn && <span className="text-[10px]">🔄</span>}
+                      <span>{item.name}</span>
+                      {item.isSwappedIn && item.replacedName && (
+                        <span className="text-[10px] opacity-75 font-medium">
+                          ({item.replacedName} yerine)
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-slate-400 py-1">
+                  Bu grup için henüz personel tanımlanmamış.
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
-      {/* 4. BOTTOM SPLIT STATUS & MONTHLY SUMMARY CARD */}
+      {/* 4. BOTTOM SPLIT STATUS & DAILY QUOTE CARD */}
       <div
         onClick={() => {
           if (isConfigured) {
@@ -351,75 +481,79 @@ export const HomeTab: React.FC<HomeTabProps> = ({
             onOpenSettings();
           }
         }}
-        className={`w-full max-w-sm rounded-3xl border p-3.5 sm:p-4 transition cursor-pointer ${
-          isLight
-            ? 'bg-gradient-to-r from-rose-50/90 via-white to-rose-50/70 border-rose-200 shadow-sm'
-            : 'bg-gradient-to-r from-[#171320] via-[#21121f] to-[#2c121e] border-rose-500/30 shadow-lg'
-        }`}
+        className={`w-full max-w-sm rounded-3xl border p-3.5 sm:p-4 transition cursor-pointer ${themePreset.summaryCardClass}`}
       >
-        <div className="grid grid-cols-[1.15fr_auto_1fr] items-center gap-3">
-          {/* Left Column: Today's Status (Only User's Status) */}
+        <div className="grid grid-cols-[1.05fr_auto_1.2fr] items-center gap-3">
+          {/* Left Column: Today's Status & Next Shift */}
           <div className="flex flex-col justify-center text-left min-w-0">
             <div
-              className={`text-[10px] font-extrabold uppercase tracking-[0.14em] truncate ${
-                isLight ? 'text-rose-600/90' : 'text-rose-400/90'
-              }`}
+              className={`text-[10px] font-extrabold uppercase tracking-[0.14em] truncate ${themePreset.summaryKickerClass}`}
             >
               {isTodaySelected ? 'Bugünün Durumu' : trDateFormatter(singleQueryDate)}
             </div>
 
             <div
-              className={`font-display mt-1 text-[21px] sm:text-[23px] font-extrabold tracking-[-0.02em] leading-tight truncate ${
+              className={`font-display mt-1 text-[20px] sm:text-[22px] font-extrabold tracking-[-0.02em] leading-tight truncate ${
                 isLight ? 'text-slate-900' : 'text-white'
               }`}
             >
               {bigStatus}
             </div>
 
-            <div className="mt-2.5 flex items-center gap-2">
-              <span className={`w-10 h-1 rounded-full ${accentBarColor}`} />
-              {myInfo.notes.length > 0 && (
-                <span className="text-[10px] font-bold text-amber-400">
-                  • {myInfo.notes.length} Not
+            <div className="mt-2 flex items-center gap-1.5 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${accentBarColor}`} />
+              {myInfo.notes.length > 0 ? (
+                <span className="text-[10.5px] font-bold text-amber-400 whitespace-nowrap">
+                  {myInfo.notes.length} Not • {nextShiftText}
+                </span>
+              ) : (
+                <span
+                  className={`text-[10.5px] font-semibold whitespace-nowrap ${
+                    isLight ? 'text-slate-600' : 'text-slate-300/95'
+                  }`}
+                >
+                  {nextShiftText}
                 </span>
               )}
             </div>
           </div>
 
           {/* Vertical Divider */}
-          <div className={`w-px h-14 ${isLight ? 'bg-rose-200/80' : 'bg-white/10'}`} />
+          <div className={`w-px h-14 ${themePreset.summaryDividerClass}`} />
 
-          {/* Right Column: Monthly Stats */}
-          <div className="flex flex-col justify-center gap-1.5 text-[11.5px]">
-            <div className="flex items-center justify-between gap-2">
-              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                <span className="text-xs leading-none">📅</span>
-                <span>Nöbet</span>
+          {/* Right Column: Motivational Duty Quote (Tap ↻ to cycle quote) */}
+          <div className="flex flex-col justify-between min-w-0 text-left">
+            <div className="flex items-center justify-between gap-1 mb-1">
+              <span
+                className={`text-[9.5px] font-extrabold uppercase tracking-wider truncate ${themePreset.summaryKickerClass}`}
+              >
+                ✨ {activeQuote.tag}
               </span>
-              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
-                {monthlyStats.dutyDays} gün
-              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setQuoteOffset((prev) => prev + 1);
+                }}
+                className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold transition cursor-pointer shrink-0 ${
+                  isLight
+                    ? 'text-slate-500 hover:text-slate-900 hover:bg-black/5'
+                    : 'text-slate-400 hover:text-white hover:bg-white/10'
+                }`}
+                title="Başka Söz Göster"
+                aria-label="Başka Söz Göster"
+              >
+                ↻
+              </button>
             </div>
 
-            <div className="flex items-center justify-between gap-2">
-              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                <span className="text-xs leading-none">🛋️</span>
-                <span>Dinlenme</span>
-              </span>
-              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
-                {monthlyStats.restDays} gün
-              </span>
-            </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <span className={`flex items-center gap-1.5 font-medium ${isLight ? 'text-slate-500' : 'text-slate-400'}`}>
-                <span className="text-xs leading-none">🕗</span>
-                <span>Toplam</span>
-              </span>
-              <span className={`font-extrabold tabular-nums ${isLight ? 'text-slate-900' : 'text-white'}`}>
-                {monthlyStats.totalHours} sa
-              </span>
-            </div>
+            <p
+              className={`text-[11px] sm:text-[11.5px] font-medium italic leading-snug line-clamp-3 ${
+                isLight ? 'text-slate-700' : 'text-slate-200/95'
+              }`}
+            >
+              “{activeQuote.text}”
+            </p>
           </div>
         </div>
       </div>

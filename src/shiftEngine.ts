@@ -301,7 +301,10 @@ export const querySingleDayForGroup = (
     if (givenAway && givenAway.swapTargetDate) {
       dayShift = null;
       nightShift = null;
-      finalStatusText = `İzinli (${trDateFormatter(givenAway.swapTargetDate)} ile değişti)`;
+      const partnerSuffix = givenAway.swapWithPerson
+        ? ` · ${givenAway.swapWithPerson} ile`
+        : '';
+      finalStatusText = `İzinli (${trDateFormatter(givenAway.swapTargetDate)}${partnerSuffix} değişti)`;
     }
 
     const prevGivenAwayDateISO = toISODate(addDays(d, -1));
@@ -323,6 +326,9 @@ export const querySingleDayForGroup = (
       (it) => it.type === 'Nöbet Değişimi' && it.swapTargetDate === isoDateStr
     );
     if (takenOver) {
+      const partnerLabel = takenOver.swapWithPerson
+        ? `${takenOver.swapWithPerson} yerine`
+        : `${trDateFormatter(takenOver.date)} yerine`;
       if (takenOver.swapShiftType === 'GUNDUZ') {
         const [sh, sm] = parseHM(settings.dayStart);
         const [eh, em] = parseHM(settings.dayEnd);
@@ -337,7 +343,7 @@ export const querySingleDayForGroup = (
           endDT: eDT,
           durationHours: dur,
         };
-        finalStatusText = `🔄☀️ Gündüz Nöbeti (${trDateFormatter(takenOver.date)} yerine)`;
+        finalStatusText = `🔄☀️ Gündüz Nöbeti (${partnerLabel})`;
       } else {
         const [sh, sm] = parseHM(settings.nightStart);
         const [eh, em] = parseHM(settings.nightEnd);
@@ -352,7 +358,7 @@ export const querySingleDayForGroup = (
           endDT: eDT,
           durationHours: dur,
         };
-        finalStatusText = `🔄🌙 Akşam Nöbeti (${trDateFormatter(takenOver.date)} yerine)`;
+        finalStatusText = `🔄🌙 Akşam Nöbeti (${partnerLabel})`;
       }
     }
 
@@ -419,7 +425,7 @@ export const whoIsOnDutyAt = (
   return active;
 };
 
-const findSwappedPartnerGroupIdx = (
+export const findSwappedPartnerGroupIdx = (
   note: NoteItem,
   settings: AppSettings,
   refHistory: RefRecord[]
@@ -443,6 +449,204 @@ const findSwappedPartnerGroupIdx = (
     }
   }
   return null;
+};
+
+const formatTitleCaseTRLocal = (raw: string): string => {
+  if (!raw) return '';
+  return raw
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toLocaleUpperCase('tr-TR') + w.slice(1).toLocaleLowerCase('tr-TR'))
+    .join(' ');
+};
+
+const normalizePersonTR = (raw: string): string => {
+  return (raw || '')
+    .trim()
+    .toLocaleLowerCase('tr-TR')
+    .replace(/\s+/g, ' ');
+};
+
+const isSamePersonNameTR = (nameA: string, nameB: string): boolean => {
+  const a = normalizePersonTR(nameA);
+  const b = normalizePersonTR(nameB);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const partsA = a.split(' ');
+  const partsB = b.split(' ');
+  if (
+    partsA[0] === partsB[0] &&
+    partsA[0].length >= 3 &&
+    (partsA.length === 1 || partsB.length === 1)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+export interface EffectiveGroupMemberItem {
+  name: string;
+  isSwappedIn?: boolean;
+  replacedName?: string;
+}
+
+export interface EffectiveGroupMembersResult {
+  membersText: string;
+  memberItems: EffectiveGroupMemberItem[];
+}
+
+/**
+ * Verilen tarih ve vardiyada ilgili grubun personel listesini döner.
+ * Eğer o gün/gece için bir Nöbet Değişimi (Becayiş) kaydı varsa,
+ * listedeki eski personelin yerine nöbet değişimi yapılan kişiyi koyar.
+ */
+export const getEffectiveGroupMembersForShift = (
+  isoDateStr: string,
+  groupIdx: number,
+  shiftType: 'GUNDUZ' | 'AKSAM' | null,
+  settings: AppSettings,
+  refHistory: RefRecord[],
+  notes: NoteItem[] = [],
+  activeProfileName?: string
+): EffectiveGroupMembersResult => {
+  const rawStr = settings.groupMembers[groupIdx] || '';
+  const baseNames = rawStr
+    .split(/[,;\n]+/)
+    .map((p) => formatTitleCaseTRLocal(p))
+    .filter(Boolean);
+
+  const memberItems: EffectiveGroupMemberItem[] = baseNames.map((name) => ({ name }));
+
+  if (!notes || notes.length === 0 || !isoDateStr) {
+    return {
+      membersText: memberItems.map((m) => m.name).join(', '),
+      memberItems,
+    };
+  }
+
+  const ref = getActiveReferenceForDate(isoDateStr, refHistory);
+  const myGroupIdx = ref ? ref.myGroupIdx : 0;
+  const myGroupRaw = settings.groupMembers[myGroupIdx] || '';
+  const myGroupPeople = myGroupRaw
+    .split(/[,;\n]+/)
+    .map((p) => formatTitleCaseTRLocal(p))
+    .filter(Boolean);
+
+  const cleanProfileName =
+    activeProfileName && activeProfileName.trim() !== 'Ana Profilim'
+      ? formatTitleCaseTRLocal(activeProfileName)
+      : '';
+
+  const defaultMyPerson = cleanProfileName || myGroupPeople[0] || '';
+
+  const applyReplacement = (outgoingName: string, incomingName: string) => {
+    const cleanIncoming = formatTitleCaseTRLocal(incomingName);
+    const cleanOutgoing = formatTitleCaseTRLocal(outgoingName);
+    if (!cleanIncoming) return;
+
+    if (cleanOutgoing) {
+      const matchIdx = memberItems.findIndex((m) =>
+        isSamePersonNameTR(m.name, cleanOutgoing)
+      );
+      if (matchIdx > -1) {
+        const oldName = memberItems[matchIdx].name;
+        memberItems[matchIdx] = {
+          name: cleanIncoming,
+          isSwappedIn: true,
+          replacedName: oldName,
+        };
+        return;
+      }
+    }
+
+    // Eğer grupta tek kişi varsa veya eski isim eşleşmediyse ilk personeli değiştir
+    if (memberItems.length >= 1) {
+      const oldName = memberItems[0].name;
+      if (!isSamePersonNameTR(oldName, cleanIncoming)) {
+        memberItems[0] = {
+          name: cleanIncoming,
+          isSwappedIn: true,
+          replacedName: cleanOutgoing || oldName,
+        };
+      }
+    } else {
+      memberItems.push({
+        name: cleanIncoming,
+        isSwappedIn: true,
+        replacedName: cleanOutgoing || undefined,
+      });
+    }
+  };
+
+  for (const note of notes) {
+    if (note.type !== 'Nöbet Değişimi') continue;
+
+    const noteWithPerson = formatTitleCaseTRLocal(note.swapWithPerson || '');
+    const noteMyPerson = formatTitleCaseTRLocal(note.swapMyPerson || defaultMyPerson);
+
+    // DURUM 1: Devredilen nöbet günü (note.date === isoDateStr)
+    if (note.date === isoDateStr) {
+      const myNormalDay = querySingleDayForGroup(isoDateStr, myGroupIdx, settings, refHistory, []);
+      const myNormalShift: 'GUNDUZ' | 'AKSAM' | null = myNormalDay.nightShift
+        ? 'AKSAM'
+        : myNormalDay.dayShift
+        ? 'GUNDUZ'
+        : null;
+
+      // Kendi grubum bu vardiyada nöbetçiyse: kendi personelim (eski personel) çıkar, nöbet değişimi yapılan kişi (noteWithPerson) girer
+      const isMyGroupOnThisShift =
+        groupIdx === myGroupIdx &&
+        (shiftType === null || myNormalShift === null || shiftType === myNormalShift);
+
+      // Veya bu grubun içinde swapMyPerson doğrudan yer alıyorsa
+      const hasMyPersonInThisGroup =
+        Boolean(noteMyPerson) &&
+        memberItems.some((m) => isSamePersonNameTR(m.name, noteMyPerson));
+
+      if ((isMyGroupOnThisShift || hasMyPersonInThisGroup) && noteWithPerson) {
+        applyReplacement(noteMyPerson, noteWithPerson);
+      }
+    }
+
+    // DURUM 2: Karşılık tutulan hedef nöbet günü (note.swapTargetDate === isoDateStr)
+    if (note.swapTargetDate && note.swapTargetDate.trim() === isoDateStr) {
+      const partnerGroupIdx = findSwappedPartnerGroupIdx(note, settings, refHistory);
+      const shiftMatches =
+        shiftType === null ||
+        !note.swapShiftType ||
+        shiftType === note.swapShiftType ||
+        settings.is24HourSystem;
+
+      if (shiftMatches && partnerGroupIdx === groupIdx) {
+        // Hedef grupta noteWithPerson varsa (eski personel), onun yerine noteMyPerson (ben) geçer.
+        // Eğer kullanıcı ters girmişse veya noteMyPerson hedef gruptaysa, onun yerine noteWithPerson geçer.
+        const hasWithInTarget =
+          Boolean(noteWithPerson) &&
+          memberItems.some((m) => isSamePersonNameTR(m.name, noteWithPerson));
+        const hasMyInTarget =
+          Boolean(noteMyPerson) &&
+          memberItems.some((m) => isSamePersonNameTR(m.name, noteMyPerson));
+
+        if (hasWithInTarget && noteMyPerson) {
+          applyReplacement(noteWithPerson, noteMyPerson);
+        } else if (hasMyInTarget && noteWithPerson) {
+          applyReplacement(noteMyPerson, noteWithPerson);
+        } else if (noteWithPerson && noteMyPerson) {
+          applyReplacement(noteWithPerson, noteMyPerson);
+        } else if (noteWithPerson) {
+          applyReplacement('', noteWithPerson);
+        } else if (noteMyPerson) {
+          applyReplacement('', noteMyPerson);
+        }
+      }
+    }
+  }
+
+  return {
+    membersText: memberItems.map((m) => m.name).join(', '),
+    memberItems,
+  };
 };
 
 export const getEffectiveGroupIdxForDate = (
@@ -579,41 +783,92 @@ export const buildICSContent = (
       d.getUTCHours()
     )}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
   };
-  const nowStamp = fmtUTC(new Date());
+  const fmtHM = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const escapeICS = (str: string) =>
+    str
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\r?\n/g, '\\n');
 
+  const nowStamp = fmtUTC(new Date());
   const daysInMonth = new Date(year, month, 0).getDate();
+
+  const targetGroups: number[] =
+    groupIdx === -2
+      ? Array.from({ length: settings.numGroups }, (_, idx) => idx)
+      : [groupIdx >= 0 ? groupIdx : -1];
+
+  const calTitle =
+    groupIdx === -2
+      ? `112 Tüm Gruplar Nöbet Takvimi (${pad(month)}/${year})`
+      : `112 Vardiya Nöbet Takvimi (${pad(month)}/${year})`;
+
   const lines: string[] = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//112 Vardiya Sistemi//TR',
+    'PRODID:-//112 Vardiya Sistemi//NONSGML v1.0//TR',
     'CALSCALE:GREGORIAN',
-    'METHOD:PUBLISH',
+    `X-WR-CALNAME:${escapeICS(calTitle)}`,
   ];
 
   for (let day = 1; day <= daysInMonth; day++) {
     const dateStr = `${year}-${pad(month)}-${pad(day)}`;
-    const info = querySingleDayForGroup(dateStr, groupIdx, settings, refs, notes);
-    const shift = info.dayShift || info.nightShift;
-    if (!shift) continue;
 
-    const title = settings.is24HourSystem
-      ? '🚑 24 Saat Nöbeti'
-      : info.dayShift
-      ? '☀️ Gündüz Nöbeti'
-      : '🌙 Akşam Nöbeti';
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:vardiya112-${dateStr}-g${info.groupIdx}-${info.dayShift ? 'D' : 'N'}@vardiya112`,
-      `DTSTAMP:${nowStamp}`,
-      `DTSTART:${fmtUTC(shift.startDT)}`,
-      `DTEND:${fmtUTC(shift.endDT)}`,
-      `SUMMARY:${title} (${info.groupName})`,
-      'END:VEVENT'
-    );
+    for (const gIdx of targetGroups) {
+      const info = querySingleDayForGroup(dateStr, gIdx, settings, refs, notes);
+      const dayShifts = [info.dayShift, info.nightShift].filter(
+        (s): s is ShiftInstance => s !== null
+      );
+
+      for (const shift of dayShifts) {
+        const isDay = shift.shiftType === 'GUNDUZ';
+        const title = settings.is24HourSystem
+          ? '🚑 24 Saat Nöbeti'
+          : isDay
+          ? '☀️ Gündüz Nöbeti'
+          : '🌙 Akşam Nöbeti';
+
+        const memberInfo = getEffectiveGroupMembersForShift(
+          dateStr,
+          shift.groupIdx,
+          shift.shiftType,
+          settings,
+          refs,
+          notes
+        );
+        const descParts = [
+          `Grup: ${info.groupName}`,
+          `Saat: ${fmtHM(shift.startDT)} - ${fmtHM(shift.endDT)} (${shift.durationHours} Saat)`,
+        ];
+        if (memberInfo.membersText) {
+          descParts.push(`Personel: ${memberInfo.membersText}`);
+        }
+
+        lines.push(
+          'BEGIN:VEVENT',
+          `UID:vardiya112-${dateStr}-g${shift.groupIdx}-${isDay ? 'D' : 'N'}@vardiya112.app`,
+          `DTSTAMP:${nowStamp}`,
+          `DTSTART:${fmtUTC(shift.startDT)}`,
+          `DTEND:${fmtUTC(shift.endDT)}`,
+          `SUMMARY:${escapeICS(`${title} (${info.groupName})`)}`,
+          `DESCRIPTION:${escapeICS(descParts.join('\n'))}`,
+          'STATUS:CONFIRMED',
+          'SEQUENCE:0',
+          'TRANSP:OPAQUE',
+          'BEGIN:VALARM',
+          'TRIGGER:-PT60M',
+          'ACTION:DISPLAY',
+          `DESCRIPTION:${escapeICS(`${title} (${info.groupName}) 1 saat sonra başlıyor`)}`,
+          'END:VALARM',
+          'END:VEVENT'
+        );
+      }
+    }
   }
 
-  lines.push('END:VCALENDAR\r\n');
-  return lines.join('\r\n');
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n') + '\r\n';
 };
 
 export const runBuiltInTests = (): string[] => {
@@ -716,7 +971,11 @@ export const runBuiltInTests = (): string[] => {
     '12/24 - 12/48 (4 Grup) sisteminde 1. gün gündüz, 2. gün gece, 5. gün tekrar gündüz olmalı.'
   );
 
-  // Test: Shift Swap (Becayiş)
+  // Test: Shift Swap (Becayiş) ve Personel Değişimi
+  const swapTestSettings: AppSettings = {
+    ...testSettings,
+    groupMembers: ['Tufan Uysal, Ali Kaya', 'Mehmet Demir', 'Ahmet Yılmaz, Hasan Çelik', 'Veli Öz', 'Burak Can'],
+  };
   const swapNotes: NoteItem[] = [
     {
       id: 1,
@@ -726,25 +985,42 @@ export const runBuiltInTests = (): string[] => {
       isNewRef: false,
       swapTargetDate: '2026-03-02',
       swapShiftType: 'AKSAM',
+      swapMyPerson: 'Tufan Uysal',
+      swapWithPerson: 'Ahmet Yılmaz',
     },
   ];
   const swappedOutDay = querySingleDayForGroup(
     '2026-03-01',
     0,
-    testSettings,
+    swapTestSettings,
     [testRefs[0]],
     swapNotes
   );
   const swappedInDay = querySingleDayForGroup(
     '2026-03-02',
     0,
-    testSettings,
+    swapTestSettings,
     [testRefs[0]],
     swapNotes
   );
   assertCond(
     swappedOutDay.dayShift === null && swappedInDay.nightShift !== null,
     'Nöbet değişimi (becayiş) yapılan gün izinli görünmeli, hedef günde yeni vardiya oluşmalı.'
+  );
+
+  const day1Members = getEffectiveGroupMembersForShift(
+    '2026-03-01',
+    0,
+    'GUNDUZ',
+    swapTestSettings,
+    [testRefs[0]],
+    swapNotes,
+    'Tufan Uysal'
+  );
+  assertCond(
+    day1Members.membersText.includes('Ahmet Yılmaz') &&
+      !day1Members.membersText.includes('Tufan Uysal'),
+    'Becayiş yapılan günde eski personelin yerine nöbet değişimi yapılan kişi görünmeli.'
   );
 
   // Test: 24-Hour Block Shift Mode (24/72)
