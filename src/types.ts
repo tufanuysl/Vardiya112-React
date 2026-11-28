@@ -35,6 +35,8 @@ export type AppThemeId =
   | 'amoled'
   | 'sand';
 
+export type AppRoleMode = 'personnel' | 'admin';
+
 export interface AppSettings {
   shiftPreset?: ShiftPresetId;
   dayStart: string; // e.g. "09:00"
@@ -52,9 +54,133 @@ export interface AppSettings {
   groupNames: string[];
   groupMembers: string[];
   theme: AppThemeId;
+  autoThemeEnabled?: boolean;
+  autoThemeDay?: AppThemeId;
+  autoThemeNight?: AppThemeId;
+  autoThemeLat?: number;
+  autoThemeLng?: number;
   defaultStartTab?: 'home' | 'calendar';
+  weatherCity?: string;
   reminderMinutesBefore?: number; // 0, 15, 30, 60 (minutes before shift start)
   notificationSound?: NotificationSoundId;
+  activeUnitId?: string;
+  activeUnitName?: string;
+  activeUnitCode?: string;
+  activeUnitType?: InstitutionType;
+  activeUnitAnnouncement?: string;
+  activeWorkerName?: string;
+  appRoleMode?: AppRoleMode;
+  onboardingCompleted?: boolean;
+  kvkkAccepted?: boolean;
+  kvkkAcceptedAt?: string;
+}
+
+export type InstitutionType =
+  | 'CAGRI_ALICI'
+  | 'POLIS'
+  | 'JANDARMA'
+  | 'ITFAIYE'
+  | 'SAGLIK_112'
+  | 'AFAD'
+  | 'ORMAN'
+  | 'DIGER';
+
+export interface InstitutionUnitDoc {
+  id: string;
+  name: string;
+  institutionType: InstitutionType;
+  city: string;
+  unitCode: string;
+  ownerUid: string;
+  ownerName: string;
+  adminUids: string[];
+  numGroups: number;
+  is24HourSystem: boolean;
+  dayStart: string;
+  dayEnd: string;
+  nightStart: string;
+  nightEnd: string;
+  shift24Start: string;
+  restHours: number;
+  dayRestHours: number;
+  nightRestHours: number;
+  shiftTransition: 'ALTERNATE' | 'SAME';
+  groupCycleMode: '112_CLASSIC' | 'SEQUENTIAL';
+  groupNames: string[];
+  groupMembers: string[];
+  refDate: string;
+  refGroupIdx: number;
+  refType: 'GUNDUZ' | 'AKSAM';
+  announcement: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface AuthorizedAdminDoc {
+  email: string;
+  name: string;
+  institutionType: 'ALL' | InstitutionType;
+  unitCode: string;
+  addedByEmail: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export type RosterRecordType =
+  | 'Nöbet Değişimi'
+  | 'İzin / Rapor'
+  | 'İcap Nöbeti'
+  | 'Nöbet Boşa Çıkarma'
+  | 'Ek Nöbet'
+  | 'Görevlendirme'
+  | 'Not'
+  | 'Diğer';
+
+export interface UnitRosterNoteDoc {
+  id: string;
+  unitId: string;
+  date: string;
+  type: RosterRecordType;
+  personName: string;
+  groupIdx: number;
+  swapWithPerson: string;
+  swapTargetDate: string;
+  swapShiftType: 'GUNDUZ' | 'AKSAM';
+  desc: string;
+  authorUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface UnitLeaveRequestDoc {
+  id: string;
+  unitId: string;
+  startDate: string;
+  endDate: string;
+  type: RosterRecordType;
+  personName: string;
+  groupIdx: number;
+  swapWithPerson: string;
+  swapTargetDate: string;
+  swapShiftType: 'GUNDUZ' | 'AKSAM';
+  desc: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface UnitAnnouncementDoc {
+  id: string;
+  unitId: string;
+  title: string;
+  content: string;
+  authorName: string;
+  authorUid: string;
+  attachmentName: string;
+  attachmentType: string;
+  attachmentDataUrl: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
 }
 
 export interface RefRecord {
@@ -74,6 +200,8 @@ export interface NoteItem {
   swapShiftType?: 'GUNDUZ' | 'AKSAM';
   swapWithPerson?: string; // Nöbet değişimi yapılan karşı personel
   swapMyPerson?: string; // Kendi grubumdan nöbeti değişen (eski) personel
+  targetGroupIdx?: number; // İlgili personelin grup indeksi (0-based)
+  cloudNoteId?: string;
 }
 
 export interface ShiftInstance {
@@ -118,4 +246,51 @@ export interface ProfileGroupMatchResult {
   matchedMemberName: string;
   confidence: 'exact' | 'partial';
 }
+
+export interface UnitProfileLockDoc {
+  id: string;
+  unitId: string;
+  personKey: string;
+  personName: string;
+  groupIdx: number;
+  ownerUid: string;
+  ownerDisplayLabel: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface UnitTableMetaDoc {
+  unitId: string;
+  tableTheme: 'classic' | 'modern' | 'dark' | 'contrast';
+  fontSize: 'sm' | 'md' | 'lg';
+  rowDensity: 'compact' | 'normal' | 'comfortable';
+  highlightWeekends: boolean;
+  zebraGroups: boolean;
+  colorizeShiftCodes: boolean;
+  showTotalsColumn: boolean;
+  highlightToday: boolean;
+  boldGroupDividers: boolean;
+  showLegend: boolean;
+  customTitle: string;
+  cellHighlights: Record<string, string>;
+  updatedByUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface UserCloudProfileDoc {
+  ownerUid: string;
+  activeUnitId: string;
+  activeUnitCity: string;
+  appRoleMode: AppRoleMode;
+  workerName: string;
+  myGroupIdx: number;
+  kvkkAccepted: boolean;
+  theme: AppThemeId;
+  defaultStartTab: 'home' | 'calendar';
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+
 

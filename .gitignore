@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+!.env.example
+DRAFT_firestore.rules
+

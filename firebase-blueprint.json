@@ -1,0 +1,811 @@
+{
+  "entities": {
+    "AuthorizedAdmin": {
+      "title": "AuthorizedAdmin",
+      "description": "Ana Yönetici tarafından kurum vardiya, izin, icap ve personel verisi girmeye yetkilendirilmiş kurum admini kaydı.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "Yetkilendirilen adminin Google e-posta adresi (küçük harf)",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "name": {
+          "type": "string",
+          "description": "Yetkili adminin adı soyadı / unvanı",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "institutionType": {
+          "type": "string",
+          "description": "Yetkili olduğu kurum kategorisi (ALL veya belirli bir kurum tipi)",
+          "enum": ["ALL", "CAGRI_ALICI", "POLIS", "JANDARMA", "ITFAIYE", "SAGLIK_112", "AFAD", "ORMAN", "DIGER"],
+          "minLength": 2,
+          "maxLength": 30
+        },
+        "unitCode": {
+          "type": "string",
+          "description": "Varsa yetkili olduğu kurum kodu",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "addedByEmail": {
+          "type": "string",
+          "description": "Yetkiyi veren Ana Yöneticinin e-posta adresi",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Güncellenme zamanı"
+        }
+      },
+      "required": [
+        "email",
+        "name",
+        "institutionType",
+        "unitCode",
+        "addedByEmail",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "InstitutionUnit": {
+      "title": "InstitutionUnit",
+      "description": "Bir kurum biriminin (Çağrı Alıcı, Polis, Jandarma, İtfaiye, 112 Sağlık, AFAD vb.) yayınlanmış vardiya sistemi, grup isimleri, personel listesi ve referans nöbet çizelgesi.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Birim adı (örn. Manisa 112 Çağrı Alıcı, Emniyet Haber Merkezi)",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "institutionType": {
+          "type": "string",
+          "description": "Kurum kategorisi",
+          "enum": ["CAGRI_ALICI", "POLIS", "JANDARMA", "ITFAIYE", "SAGLIK_112", "AFAD", "ORMAN", "DIGER"],
+          "minLength": 2,
+          "maxLength": 30
+        },
+        "city": {
+          "type": "string",
+          "description": "İl adı",
+          "minLength": 2,
+          "maxLength": 50
+        },
+        "unitCode": {
+          "type": "string",
+          "description": "Personelin birime bağlanması için kurum kodu (örn. MANISA-112)",
+          "minLength": 2,
+          "maxLength": 40,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Kurumu oluşturan büro sorumlusunun / yöneticinin Firebase Auth UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "ownerName": {
+          "type": "string",
+          "description": "Büro sorumlusu / yönetici adı soyadı",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "adminUids": {
+          "type": "array",
+          "description": "Bu kurumun verisini düzenlemeye yetkili büro personeli UID listesi (en fazla 10 kişi)"
+        },
+        "numGroups": {
+          "type": "number",
+          "description": "Grup sayısı (2-10)"
+        },
+        "is24HourSystem": {
+          "type": "boolean",
+          "description": "24 saat nöbet sistemi mi?"
+        },
+        "dayStart": {
+          "type": "string",
+          "description": "Gündüz vardiya başlangıç saati (SS:DD)",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "dayEnd": {
+          "type": "string",
+          "description": "Gündüz vardiya bitiş saati (SS:DD)",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "nightStart": {
+          "type": "string",
+          "description": "Gece vardiya başlangıç saati (SS:DD)",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "nightEnd": {
+          "type": "string",
+          "description": "Gece vardiya bitiş saati (SS:DD)",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "shift24Start": {
+          "type": "string",
+          "description": "24 saat vardiya başlangıç saati (SS:DD)",
+          "minLength": 5,
+          "maxLength": 5
+        },
+        "restHours": {
+          "type": "number",
+          "description": "Varsayılan istirahat süresi (saat)"
+        },
+        "dayRestHours": {
+          "type": "number",
+          "description": "Gündüz nöbeti sonrası istirahat süresi (saat)"
+        },
+        "nightRestHours": {
+          "type": "number",
+          "description": "Gece nöbeti sonrası istirahat süresi (saat)"
+        },
+        "shiftTransition": {
+          "type": "string",
+          "description": "Vardiya geçiş tipi (ALTERNATE veya SAME)",
+          "enum": ["ALTERNATE", "SAME"],
+          "minLength": 4,
+          "maxLength": 12
+        },
+        "groupCycleMode": {
+          "type": "string",
+          "description": "Grup döngü modu (112_CLASSIC veya SEQUENTIAL)",
+          "enum": ["112_CLASSIC", "SEQUENTIAL"],
+          "minLength": 10,
+          "maxLength": 15
+        },
+        "groupNames": {
+          "type": "array",
+          "description": "Grup adları dizisi (en fazla 10 grup)"
+        },
+        "groupMembers": {
+          "type": "array",
+          "description": "Her grubun virgülle ayrılmış personel isim listesi (en fazla 10 grup, ilk sıradaki Grup Sorumlusu, ikinci sıradaki Grup Sorumlusu Yardımcısı)"
+        },
+        "refDate": {
+          "type": "string",
+          "description": "Aktif referans nöbet tarihi (YYYY-MM-DD)",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "refGroupIdx": {
+          "type": "number",
+          "description": "Referans tarihte nöbetçi olan grup indeksi (0 tabanlı)"
+        },
+        "refType": {
+          "type": "string",
+          "description": "Referans nöbet tipi (GUNDUZ veya AKSAM)",
+          "enum": ["GUNDUZ", "AKSAM"],
+          "minLength": 5,
+          "maxLength": 6
+        },
+        "announcement": {
+          "type": "string",
+          "description": "Büro personeli tarafından yayınlanan kurum duyurusu veya aylık not",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı (Sunucu zaman damgası)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı (Sunucu zaman damgası)"
+        }
+      },
+      "required": [
+        "name",
+        "institutionType",
+        "city",
+        "unitCode",
+        "ownerUid",
+        "ownerName",
+        "adminUids",
+        "numGroups",
+        "is24HourSystem",
+        "dayStart",
+        "dayEnd",
+        "nightStart",
+        "nightEnd",
+        "shift24Start",
+        "restHours",
+        "dayRestHours",
+        "nightRestHours",
+        "shiftTransition",
+        "groupCycleMode",
+        "groupNames",
+        "groupMembers",
+        "refDate",
+        "refGroupIdx",
+        "refType",
+        "announcement",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UnitRosterNote": {
+      "title": "UnitRosterNote",
+      "description": "Büro personeli / yönetici tarafından kurum tablosuna işlenen resmi nöbet değişimi (becayiş), izin, rapor, icap nöbeti, görevlendirme veya not kaydı.",
+      "type": "object",
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "description": "Ait olduğu kurum birimi ID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "date": {
+          "type": "string",
+          "description": "Kaydın geçerli olduğu tarih (YYYY-MM-DD)",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "type": {
+          "type": "string",
+          "description": "Kayıt türü (Nöbet Değişimi, İzin / Rapor, İcap Nöbeti, Nöbet Boşa Çıkarma, Ek Nöbet, Görevlendirme, Not, Diğer)",
+          "enum": ["Nöbet Değişimi", "İzin / Rapor", "İcap Nöbeti", "Nöbet Boşa Çıkarma", "Ek Nöbet", "Görevlendirme", "Not", "Diğer"],
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "personName": {
+          "type": "string",
+          "description": "İlgili personel adı soyadı",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "groupIdx": {
+          "type": "number",
+          "description": "Personelin grup indeksi (0-9)"
+        },
+        "swapWithPerson": {
+          "type": "string",
+          "description": "Becayiş yapılan karşı personel adı soyadı",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "swapTargetDate": {
+          "type": "string",
+          "description": "Becayiş hedef tarihi (YYYY-MM-DD veya boş)",
+          "minLength": 0,
+          "maxLength": 10
+        },
+        "swapShiftType": {
+          "type": "string",
+          "description": "Becayiş veya icap vardiya tipi (GUNDUZ veya AKSAM)",
+          "enum": ["GUNDUZ", "AKSAM"],
+          "minLength": 5,
+          "maxLength": 6
+        },
+        "desc": {
+          "type": "string",
+          "description": "Açıklama",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "authorUid": {
+          "type": "string",
+          "description": "Kaydı giren büro personelinin UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı"
+        }
+      },
+      "required": [
+        "unitId",
+        "date",
+        "type",
+        "personName",
+        "groupIdx",
+        "swapWithPerson",
+        "swapTargetDate",
+        "swapShiftType",
+        "desc",
+        "authorUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UnitLeaveRequest": {
+      "title": "UnitLeaveRequest",
+      "description": "Bireysel kullanıcı (personel) tarafından takvim veya tablo üzerinden yönetici onayına gönderilen izin, icap, nöbet değişimi veya not talebi. Yönetici onayladığında ana kurum takvimine ve tabloya otomatik geçiş yapar.",
+      "type": "object",
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "description": "Ait olduğu kurum birimi ID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "startDate": {
+          "type": "string",
+          "description": "Talep başlangıç tarihi (YYYY-MM-DD)",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "endDate": {
+          "type": "string",
+          "description": "Talep bitiş tarihi (YYYY-MM-DD)",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "type": {
+          "type": "string",
+          "description": "Talep türü (İzin / Rapor, İcap Nöbeti, Nöbet Değişimi, Nöbet Boşa Çıkarma, Ek Nöbet, Görevlendirme, Not, Diğer)",
+          "enum": ["Nöbet Değişimi", "İzin / Rapor", "İcap Nöbeti", "Nöbet Boşa Çıkarma", "Ek Nöbet", "Görevlendirme", "Not", "Diğer"],
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "personName": {
+          "type": "string",
+          "description": "Talebi gönderen personel adı soyadı",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "groupIdx": {
+          "type": "number",
+          "description": "Personelin grup indeksi (0-9)"
+        },
+        "swapWithPerson": {
+          "type": "string",
+          "description": "Varsa nöbet değişimi yapılan karşı personel adı soyadı",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "swapTargetDate": {
+          "type": "string",
+          "description": "Varsa nöbet değişimi hedef tarihi (YYYY-MM-DD veya boş)",
+          "minLength": 0,
+          "maxLength": 10
+        },
+        "swapShiftType": {
+          "type": "string",
+          "description": "İcap veya değişim vardiya tipi (GUNDUZ veya AKSAM)",
+          "enum": ["GUNDUZ", "AKSAM"],
+          "minLength": 5,
+          "maxLength": 6
+        },
+        "desc": {
+          "type": "string",
+          "description": "Talep açıklaması",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "status": {
+          "type": "string",
+          "description": "Onay durumu (PENDING, APPROVED, REJECTED)",
+          "enum": ["PENDING", "APPROVED", "REJECTED"],
+          "minLength": 7,
+          "maxLength": 8
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Güncellenme zamanı"
+        }
+      },
+      "required": [
+        "unitId",
+        "startDate",
+        "endDate",
+        "type",
+        "personName",
+        "groupIdx",
+        "swapWithPerson",
+        "swapTargetDate",
+        "swapShiftType",
+        "desc",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UnitProfileLock": {
+      "title": "UnitProfileLock",
+      "description": "Bir personelin adının başka bir kullanıcı tarafından taklit edilerek profil açılmasını ve bireysel izin/nöbet verilerinin görülmesini engelleyen doğrulanmış Google hesap kilidi.",
+      "type": "object",
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "description": "Ait olduğu kurum birimi ID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "personKey": {
+          "type": "string",
+          "description": "Personel adının ASCII normalize edilmiş benzersiz anahtarı",
+          "minLength": 2,
+          "maxLength": 80,
+          "pattern": "^[a-z0-9_\\-]+$"
+        },
+        "personName": {
+          "type": "string",
+          "description": "Kilitlenen personelin görünen adı soyadı",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "groupIdx": {
+          "type": "number",
+          "description": "Personelin grup indeksi (0-9)"
+        },
+        "ownerUid": {
+          "type": "string",
+          "description": "Profili doğrulayıp kilitleyen kullanıcının Firebase Auth UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "ownerDisplayLabel": {
+          "type": "string",
+          "description": "E-posta içermeyen maskeli doğrulama etiketi (PII içermez)",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Kilit oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı"
+        }
+      },
+      "required": [
+        "unitId",
+        "personKey",
+        "personName",
+        "groupIdx",
+        "ownerUid",
+        "ownerDisplayLabel",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UnitTableMeta": {
+      "title": "UnitTableMeta",
+      "description": "Kurum aylık nöbet çizelgesi tablosunun sunucuda kalıcı olarak saklanan görsel tema, başlık, yoğunluk ayarları ve hücre renk vurguları.",
+      "type": "object",
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "description": "Ait olduğu kurum birimi ID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "tableTheme": {
+          "type": "string",
+          "description": "Tablo teması",
+          "enum": ["classic", "modern", "dark", "contrast"],
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "fontSize": {
+          "type": "string",
+          "description": "Tablo yazı boyutu",
+          "enum": ["sm", "md", "lg"],
+          "minLength": 2,
+          "maxLength": 4
+        },
+        "rowDensity": {
+          "type": "string",
+          "description": "Satır yoğunluğu",
+          "enum": ["compact", "normal", "comfortable"],
+          "minLength": 6,
+          "maxLength": 12
+        },
+        "highlightWeekends": {
+          "type": "boolean",
+          "description": "Hafta sonu sütun vurgusu"
+        },
+        "zebraGroups": {
+          "type": "boolean",
+          "description": "Grup satır şeridi"
+        },
+        "colorizeShiftCodes": {
+          "type": "boolean",
+          "description": "S ve A nöbet kodlarını renklendirme"
+        },
+        "showTotalsColumn": {
+          "type": "boolean",
+          "description": "Toplam nöbet ve saat sütunu görünürlüğü"
+        },
+        "highlightToday": {
+          "type": "boolean",
+          "description": "Bugün sütunu vurgusu"
+        },
+        "boldGroupDividers": {
+          "type": "boolean",
+          "description": "Kalın grup ayırıcı çizgileri"
+        },
+        "showLegend": {
+          "type": "boolean",
+          "description": "Alt açıklama çubuğu görünürlüğü"
+        },
+        "customTitle": {
+          "type": "string",
+          "description": "Özel tablo başlığı",
+          "minLength": 0,
+          "maxLength": 120
+        },
+        "cellHighlights": {
+          "type": "object",
+          "description": "Hücre anahtarı (rowKey::YYYY-MM-DD) bazlı arka plan renk vurguları (en fazla 500 kayıt)"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "description": "Son güncelleyen yöneticinin Firebase Auth UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı"
+        }
+      },
+      "required": [
+        "unitId",
+        "tableTheme",
+        "fontSize",
+        "rowDensity",
+        "highlightWeekends",
+        "zebraGroups",
+        "colorizeShiftCodes",
+        "showTotalsColumn",
+        "highlightToday",
+        "boldGroupDividers",
+        "showLegend",
+        "customTitle",
+        "cellHighlights",
+        "updatedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserCloudProfile": {
+      "title": "UserCloudProfile",
+      "description": "Uygulama sıfırlandığında veya cihaz değiştiğinde kullanıcının bağlı olduğu il, kurum, rol, grup ve görünüm tercihlerini sunucudan otomatik geri yüklemek için saklanan kişisel ayar kaydı (PII içermez).",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Kullanıcının Firebase Auth UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "activeUnitId": {
+          "type": "string",
+          "description": "Bağlı olunan kurum birimi ID değeri",
+          "minLength": 0,
+          "maxLength": 128
+        },
+        "activeUnitCity": {
+          "type": "string",
+          "description": "Seçili il adı",
+          "minLength": 0,
+          "maxLength": 50
+        },
+        "appRoleMode": {
+          "type": "string",
+          "description": "Kullanım rolü",
+          "enum": ["personnel", "admin"],
+          "minLength": 5,
+          "maxLength": 9
+        },
+        "workerName": {
+          "type": "string",
+          "description": "Seçili personel adı",
+          "minLength": 0,
+          "maxLength": 100
+        },
+        "myGroupIdx": {
+          "type": "number",
+          "description": "Seçili nöbet grubu indeksi (0-9)"
+        },
+        "kvkkAccepted": {
+          "type": "boolean",
+          "description": "KVKK aydınlatma ve kullanım koşulları onay durumu"
+        },
+        "theme": {
+          "type": "string",
+          "description": "Seçili uygulama teması",
+          "minLength": 2,
+          "maxLength": 20
+        },
+        "defaultStartTab": {
+          "type": "string",
+          "description": "Varsayılan başlangıç sekmesi",
+          "enum": ["home", "calendar"],
+          "minLength": 4,
+          "maxLength": 8
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı"
+        }
+      },
+      "required": [
+        "ownerUid",
+        "activeUnitId",
+        "activeUnitCity",
+        "appRoleMode",
+        "workerName",
+        "myGroupIdx",
+        "kvkkAccepted",
+        "theme",
+        "defaultStartTab",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UnitAnnouncement": {
+      "title": "UnitAnnouncement",
+      "description": "Kurum yöneticisi tarafından personele gönderilen resmi genel duyuru ve ekli resmi yazı/PDF belgesi.",
+      "type": "object",
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "description": "Ait olduğu kurum birimi ID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string",
+          "description": "Duyuru başlığı",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "content": {
+          "type": "string",
+          "description": "Duyuru metni",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Duyuruyu yayınlayan yöneticinin adı",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "authorUid": {
+          "type": "string",
+          "description": "Duyuruyu yayınlayan yöneticinin UID değeri",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "attachmentName": {
+          "type": "string",
+          "description": "Ekli resmi yazı veya PDF dosyasının adı (yoksa boş)",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "attachmentType": {
+          "type": "string",
+          "description": "Ekli dosyanın MIME türü (örn: application/pdf, image/jpeg)",
+          "minLength": 0,
+          "maxLength": 80
+        },
+        "attachmentDataUrl": {
+          "type": "string",
+          "description": "Ekli resmi yazı veya PDF dosyasının base64 Data URL içeriği",
+          "minLength": 0,
+          "maxLength": 900000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Oluşturulma zamanı"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Son güncellenme zamanı"
+        }
+      },
+      "required": [
+        "unitId",
+        "title",
+        "content",
+        "authorName",
+        "authorUid",
+        "attachmentName",
+        "attachmentType",
+        "attachmentDataUrl",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/authorizedAdmins/{adminEmail}": {
+      "schema": {
+        "$ref": "AuthorizedAdmin"
+      },
+      "description": "Ana Yönetici tarafından yetkilendirilmiş kurum adminlerinin e-posta tabanlı yetki listesi"
+    },
+    "/units/{unitId}": {
+      "schema": {
+        "$ref": "InstitutionUnit"
+      },
+      "description": "Kurum birimlerinin (Çağrı Alıcı, Polis, Jandarma, İtfaiye, 112 Sağlık vb.) canlı vardiya ve personel tabloları"
+    },
+    "/units/{unitId}/rosterNotes/{noteId}": {
+      "schema": {
+        "$ref": "UnitRosterNote"
+      },
+      "description": "Kurum birimine ait resmi becayiş, izin, icap, not ve görevlendirme kayıtları"
+    },
+    "/units/{unitId}/leaveRequests/{reqId}": {
+      "schema": {
+        "$ref": "UnitLeaveRequest"
+      },
+      "description": "Bireysel kullanıcılar tarafından yönetici onayına gönderilen izin, icap, nöbet değişimi ve not talepleri"
+    },
+    "/units/{unitId}/profileLocks/{personKey}": {
+      "schema": {
+        "$ref": "UnitProfileLock"
+      },
+      "description": "Personel isimlerinin doğrulanmış Google hesaplarına kilitlenerek kimlik taklidini ve izinsiz bireysel veri erişimini önleyen kilit kayıtları"
+    },
+    "/units/{unitId}/tableMeta/{metaId}": {
+      "schema": {
+        "$ref": "UnitTableMeta"
+      },
+      "description": "Kurum çizelgesi tablo özelleştirme ayarları ve hücre renk vurguları"
+    },
+    "/units/{unitId}/announcements/{annId}": {
+      "schema": {
+        "$ref": "UnitAnnouncement"
+      },
+      "description": "Kurum yöneticisinin yayınladığı resmi duyurular ve PDF/resmi yazı ekleri"
+    },
+    "/userProfiles/{userId}": {
+      "schema": {
+        "$ref": "UserCloudProfile"
+      },
+      "description": "Doğrulanmış Google kullanıcılarının uygulama sıfırlansa bile korunan kurum bağlantısı ve görünüm ayarları"
+    }
+  }
+}

@@ -13,6 +13,9 @@ interface Real3DEarthProps {
   members: string;
   remainText: string;
   progressFrac: number;
+  isPaused?: boolean;
+  compact?: boolean;
+  cityName?: string;
 }
 
 interface Star {
@@ -29,9 +32,7 @@ interface Star {
 const textureLoader = new THREE.TextureLoader();
 let cachedDayTexture: THREE.Texture | null = null;
 let cachedNightTexture: THREE.Texture | null = null;
-let cachedBumpTexture: THREE.Texture | null = null;
 let cachedCloudTexture: THREE.Texture | null = null;
-let cachedWaterTexture: THREE.Texture | null = null;
 
 function configureSeamlessTexture(tex: THREE.Texture, isColorMap: boolean): THREE.Texture {
   if (isColorMap) {
@@ -58,30 +59,16 @@ function getEarthTextures() {
       true
     );
   }
-  if (!cachedBumpTexture) {
-    cachedBumpTexture = configureSeamlessTexture(
-      textureLoader.load('/textures/earth-bump.png'),
-      false
-    );
-  }
   if (!cachedCloudTexture) {
     cachedCloudTexture = configureSeamlessTexture(
       textureLoader.load('/textures/earth-clouds.png'),
       true
     );
   }
-  if (!cachedWaterTexture) {
-    cachedWaterTexture = configureSeamlessTexture(
-      textureLoader.load('/textures/earth-water.png'),
-      false
-    );
-  }
   return {
     dayTexture: cachedDayTexture,
     nightTexture: cachedNightTexture,
-    bumpTexture: cachedBumpTexture,
     cloudTexture: cachedCloudTexture,
-    waterTexture: cachedWaterTexture,
   };
 }
 
@@ -177,6 +164,9 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
   members,
   remainText,
   progressFrac,
+  isPaused = false,
+  compact = false,
+  cityName,
 }) => {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const earthStageRef = useRef<HTMLDivElement | null>(null);
@@ -184,6 +174,8 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
   const isDraggingRef = useRef<boolean>(false);
   const prevMouseXRef = useRef<number>(0);
   const dragVelocityRef = useRef<number>(0);
+  const isPausedRef = useRef<boolean>(isPaused);
+  isPausedRef.current = isPaused;
 
   const activeThemeId: AppThemeId = themeId || (isLight ? 'light' : 'dark');
   const themePreset = getThemePreset(activeThemeId);
@@ -193,6 +185,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
   // 1. THEME-SPECIFIC UPPER-SCREEN SKY CANVAS & CELESTIAL ARTIFACTS
   // ============================================================================
   useEffect(() => {
+    if (compact) return;
     const skyCanvas = skyCanvasRef.current;
     const wrapper = wrapperRef.current;
     if (!skyCanvas || !wrapper) return;
@@ -319,8 +312,16 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       ctx.restore();
     };
 
-    const renderSky = () => {
-      timeTick += 0.016;
+    let lastSkyDrawTs = 0;
+
+    const renderSky = (nowTs: number) => {
+      animId = requestAnimationFrame(renderSky);
+      if (document.hidden || isPausedRef.current) return;
+      // Throttle decorative 2D sky canvas to ~30fps to save mobile CPU & battery
+      if (lastSkyDrawTs !== 0 && nowTs - lastSkyDrawTs < 32) return;
+      lastSkyDrawTs = nowTs;
+
+      timeTick += 0.032;
       ctx.clearRect(0, 0, width, height);
       const earthCenterX = width * 0.5;
       const earthRadius = 148;
@@ -822,8 +823,6 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
         ctx.fill();
       }
-
-      animId = requestAnimationFrame(renderSky);
     };
 
     animId = requestAnimationFrame(renderSky);
@@ -837,7 +836,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       ro.disconnect();
       window.removeEventListener('resize', updateSize);
     };
-  }, [isDarkTheme, activeThemeId, themePreset]);
+  }, [isDarkTheme, activeThemeId, themePreset, compact]);
 
   // ============================================================================
   // 2. THREE.JS 3D GLOBE & THEME-SPECIFIC 3D ORBITAL ARTIFACTS
@@ -857,8 +856,9 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     })();
 
     const scene = new THREE.Scene();
-    const width = container.clientWidth || 332;
-    const height = container.clientHeight || 332;
+    const initialSize = compact ? 84 : 332;
+    const width = container.clientWidth || initialSize;
+    const height = container.clientHeight || initialSize;
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
     camera.position.set(0, 0, 2.82);
@@ -866,14 +866,14 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     const renderer = new THREE.WebGLRenderer({
       alpha: true,
       antialias: !isSoftwareGl,
-      powerPreference: 'high-performance',
-      preserveDrawingBuffer: true,
+      powerPreference: 'default',
+      preserveDrawingBuffer: false,
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
+    renderer.toneMappingExposure = 1.0;
     renderer.domElement.style.outline = 'none';
     renderer.domElement.style.touchAction = 'none';
     renderer.domElement.style.position = 'relative';
@@ -882,122 +882,47 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       'cursor-grab active:cursor-grabbing select-none transition-all block w-full h-full';
     container.appendChild(renderer.domElement);
 
-    // Studio Environment Reflection for metallic/crystal 3D orbital artifacts
+    // Studio Environment Reflection (used only by metallic 3D orbital artifacts, never by the Earth or clouds)
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     const envTarget = pmremGenerator.fromScene(new RoomEnvironment(), 0.04);
     scene.environment = envTarget.texture;
     pmremGenerator.dispose();
 
-    const { dayTexture, nightTexture, bumpTexture, cloudTexture, waterTexture } =
-      getEarthTextures();
+    const { dayTexture, nightTexture, cloudTexture } = getEarthTextures();
     const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
     dayTexture.anisotropy = maxAnisotropy;
     nightTexture.anisotropy = maxAnisotropy;
     cloudTexture.anisotropy = maxAnisotropy;
 
-    // Warm/Cool Lighting Rig
-    const hemiLight = new THREE.HemisphereLight(
-      themePreset.earthRimHex,
-      themePreset.earthAtmosphereHex,
-      isDarkTheme ? 0.55 : 0.85
-    );
-    scene.add(hemiLight);
-
-    const ambientLight = new THREE.AmbientLight(
-      isDarkTheme ? 0xe2e8f0 : 0xffffff,
-      isDarkTheme ? 0.75 : 1.05
-    );
+    // Clean Neutral Lighting Rig (no colored wash or specular glare on the Earth)
+    const ambientLight = new THREE.AmbientLight(0xffffff, isDarkTheme ? 1.05 : 1.15);
     scene.add(ambientLight);
 
-    const sunLight = new THREE.DirectionalLight(
-      isDarkTheme ? 0xfef9c3 : 0xfff7ed,
-      isDarkTheme ? 1.55 : 2.1
-    );
+    const sunLight = new THREE.DirectionalLight(0xffffff, isDarkTheme ? 1.55 : 2.15);
     sunLight.position.set(isDarkTheme ? 2.5 : -2.5, 1.8, 2.8);
     scene.add(sunLight);
 
-    // Theme-Specific Globe Surface Configuration
+    // Pure Natural Earth Surface (no tint, no emissive wash, no specular/atmosphere coating)
     const earthRadius = 0.99;
     const earthGeometry = new THREE.SphereGeometry(earthRadius, 64, 64);
+    const globeBaseMap = isDarkTheme ? nightTexture : dayTexture;
 
-    let globeBaseMap = isDarkTheme ? nightTexture : dayTexture;
-    let globeTint = new THREE.Color(0xffffff);
-    let globeEmissive = new THREE.Color(0xffdfa3);
-    let globeEmissiveIntensity = isDarkTheme ? 0.92 : 0;
-    let globeRoughness = isDarkTheme ? 0.72 : 0.55;
-    let globeMetalness = 0.08;
-    let cloudTint = new THREE.Color(0xffffff);
-    let cloudOpacity = isDarkTheme ? 0.2 : 0.38;
-
-    if (activeThemeId === 'emerald') {
-      globeTint = new THREE.Color(0xd1fae5);
-      globeEmissive = new THREE.Color(0x10b981);
-      globeEmissiveIntensity = 1.15;
-      cloudTint = new THREE.Color(0xa7f3d0);
-      cloudOpacity = 0.24;
-    } else if (activeThemeId === 'ocean') {
-      globeBaseMap = dayTexture;
-      globeTint = new THREE.Color(0x38bdf8);
-      globeEmissive = new THREE.Color(0x06b6d4);
-      globeEmissiveIntensity = 0.85;
-      globeRoughness = 0.38;
-      globeMetalness = 0.22;
-      cloudTint = new THREE.Color(0xbae6fd);
-      cloudOpacity = 0.28;
-    } else if (activeThemeId === 'sunset') {
-      globeBaseMap = dayTexture;
-      globeTint = new THREE.Color(0xfdba74);
-      globeEmissive = new THREE.Color(0xf97316);
-      globeEmissiveIntensity = 0.95;
-      globeRoughness = 0.65;
-      cloudTint = new THREE.Color(0xfde68a);
-      cloudOpacity = 0.24;
-    } else if (activeThemeId === 'amethyst') {
-      globeTint = new THREE.Color(0xe9d5ff);
-      globeEmissive = new THREE.Color(0xc084fc);
-      globeEmissiveIntensity = 1.15;
-      cloudTint = new THREE.Color(0xf5d0fe);
-      cloudOpacity = 0.22;
-    } else if (activeThemeId === 'amoled') {
-      globeTint = new THREE.Color(0x64748b);
-      globeEmissive = new THREE.Color(0xf43f5e);
-      globeEmissiveIntensity = 1.25;
-      globeRoughness = 0.82;
-      cloudOpacity = 0.12;
-    } else if (activeThemeId === 'sand') {
-      globeBaseMap = dayTexture;
-      globeTint = new THREE.Color(0xfde68a);
-      globeEmissive = new THREE.Color(0xd97706);
-      globeEmissiveIntensity = 0.12;
-      globeRoughness = 0.48;
-      globeMetalness = 0.18;
-      cloudTint = new THREE.Color(0xfef3c7);
-      cloudOpacity = 0.32;
-    }
-
-    const earthMaterial = new THREE.MeshStandardMaterial({
+    const earthMaterial = new THREE.MeshLambertMaterial({
       map: globeBaseMap,
-      color: globeTint,
-      bumpMap: bumpTexture,
-      bumpScale: 0.024,
-      roughnessMap: activeThemeId === 'ocean' || !isDarkTheme ? waterTexture : null,
-      roughness: globeRoughness,
-      metalness: globeMetalness,
-      emissive: globeEmissive,
-      emissiveMap: isDarkTheme ? nightTexture : null,
-      emissiveIntensity: globeEmissiveIntensity,
+      color: 0xffffff,
     });
     const earthMesh = new THREE.Mesh(earthGeometry, earthMaterial);
     earthMesh.rotation.y = -2.1;
     earthMesh.rotation.x = 0.18;
     scene.add(earthMesh);
 
+    // Pure Natural Clouds Only (AdditiveBlending on MeshBasicMaterial: black = 100% transparent, white = crisp clouds)
     const cloudGeometry = new THREE.SphereGeometry(earthRadius * 1.012, 64, 64);
-    const cloudMaterial = new THREE.MeshStandardMaterial({
+    const cloudMaterial = new THREE.MeshBasicMaterial({
       map: cloudTexture,
-      color: cloudTint,
+      color: 0xffffff,
       transparent: true,
-      opacity: cloudOpacity,
+      opacity: isDarkTheme ? 0.26 : 0.42,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
@@ -1005,48 +930,6 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
     cloudMesh.rotation.y = -2.1;
     cloudMesh.rotation.x = 0.18;
     scene.add(cloudMesh);
-
-    // Feathered Outer Atmosphere Glow
-    const atmosphereRadius = earthRadius * 1.065;
-    const atmosphereGeometry = new THREE.SphereGeometry(atmosphereRadius, 64, 64);
-    const atmosphereMaterial = new THREE.ShaderMaterial({
-      vertexShader: `
-        varying vec3 vNormal;
-        varying vec3 vPosition;
-        void main() {
-          vNormal = normalize(normalMatrix * normal);
-          vPosition = (modelViewMatrix * vec4(position, 1.0)).xyz;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vNormal;
-        varying vec3 vPosition;
-        uniform vec3 uColor;
-        uniform vec3 uRimColor;
-        uniform float uMaxAlpha;
-        void main() {
-          vec3 viewDir = normalize(-vPosition);
-          float viewDot = max(0.0, -dot(vNormal, viewDir));
-          float outerFade = smoothstep(0.10, 0.65, viewDot);
-          float softCurve = pow(outerFade, 2.7);
-          vec3 atmosphereColor = mix(uColor, uRimColor, softCurve);
-          float alpha = softCurve * uMaxAlpha;
-          gl_FragColor = vec4(atmosphereColor, alpha);
-        }
-      `,
-      uniforms: {
-        uColor: { value: new THREE.Color(themePreset.earthAtmosphereHex) },
-        uRimColor: { value: new THREE.Color(themePreset.earthRimHex) },
-        uMaxAlpha: { value: isDarkTheme ? 0.25 : 0.24 },
-      },
-      blending: THREE.AdditiveBlending,
-      side: THREE.BackSide,
-      transparent: true,
-      depthWrite: false,
-    });
-    const atmosphereMesh = new THREE.Mesh(atmosphereGeometry, atmosphereMaterial);
-    scene.add(atmosphereMesh);
 
     // =========================================================================
     // 3. BUILD THEME-SPECIFIC 3D ORBITAL / PLANETARY ARTIFACTS (`artifactGroup`)
@@ -1353,9 +1236,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       const moonMat = registerMat(
         new THREE.MeshStandardMaterial({
           color: 0xfed7aa,
-          bumpMap: bumpTexture,
-          bumpScale: 0.015,
-          roughness: 0.75,
+          roughness: 0.78,
           metalness: 0.1,
         })
       );
@@ -1458,21 +1339,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         }
       };
     } else if (activeThemeId === 'amoled') {
-      // 🖤 OLED TAM SİYAH: Tactical Geodesic Wireframe Shell + Crimson Radar Sweep Ring
-      const geoWireMat = registerMat(
-        new THREE.MeshBasicMaterial({
-          color: 0xf43f5e,
-          wireframe: true,
-          transparent: true,
-          opacity: 0.13,
-        })
-      );
-      const geoWireMesh = new THREE.Mesh(
-        registerGeo(new THREE.IcosahedronGeometry(earthRadius * 1.018, 3)),
-        geoWireMat
-      );
-      earthMesh.add(geoWireMesh);
-
+      // 🖤 OLED TAM SİYAH: Crimson Radar Sweep Ring (no wireframe coating over the Earth surface)
       const radarPivot = new THREE.Group();
       radarPivot.rotation.z = 0.38;
       radarPivot.rotation.x = 0.24;
@@ -1551,8 +1418,14 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
 
     let animationFrameId: number;
     const clock = new THREE.Clock();
+    let hasRenderedInitialFrame = false;
 
     const animate = () => {
+      animationFrameId = requestAnimationFrame(animate);
+      if ((document.hidden || isPausedRef.current) && hasRenderedInitialFrame) {
+        return;
+      }
+
       const elapsed = clock.getElapsedTime();
 
       if (!isDraggingRef.current) {
@@ -1566,20 +1439,23 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       }
 
       renderer.render(scene, camera);
-      animationFrameId = requestAnimationFrame(animate);
+      hasRenderedInitialFrame = true;
     };
 
     animationFrameId = requestAnimationFrame(animate);
 
     const handleResize = () => {
       if (!container) return;
-      const w = container.clientWidth || 332;
-      const h = container.clientHeight || 332;
+      const defaultSize = compact ? 76 : 332;
+      const rect = container.getBoundingClientRect();
+      const w = Math.round(rect.width) || container.clientWidth || defaultSize;
+      const h = Math.round(rect.height) || container.clientHeight || defaultSize;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     };
 
+    const rafResizeId = requestAnimationFrame(handleResize);
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
 
@@ -1610,6 +1486,7 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
 
     return () => {
       cancelAnimationFrame(animationFrameId);
+      cancelAnimationFrame(rafResizeId);
       resizeObserver.disconnect();
       domElement.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointermove', onPointerMove);
@@ -1619,8 +1496,6 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
       earthMaterial.dispose();
       cloudGeometry.dispose();
       cloudMaterial.dispose();
-      atmosphereGeometry.dispose();
-      atmosphereMaterial.dispose();
       for (const g of disposableGeometries) g.dispose();
       for (const m of disposableMaterials) m.dispose();
       envTarget.dispose();
@@ -1629,13 +1504,76 @@ export const Real3DEarth: React.FC<Real3DEarthProps> = ({
         domElement.parentElement.removeChild(domElement);
       }
     };
-  }, [isDarkTheme, isLight, activeThemeId, themePreset]);
+  }, [isDarkTheme, isLight, activeThemeId, themePreset, compact]);
 
   const progressPct = Math.min(100, Math.max(0, Math.round(progressFrac * 100)));
 
   const arcRadius = 153;
   const arcLength = 267.04;
   const arcOffset = arcLength * (1 - Math.min(1, Math.max(0, progressFrac)));
+
+  if (compact) {
+    const cleanCityUpper = (cityName || '').trim().toLocaleUpperCase('tr-TR');
+    return (
+      <div
+        ref={wrapperRef}
+        className="relative w-[86px] h-[86px] sm:w-[90px] sm:h-[90px] shrink-0 flex items-center justify-center select-none touch-none"
+      >
+        <div
+          ref={earthStageRef}
+          className="relative w-[86px] h-[86px] sm:w-[90px] sm:h-[90px] shrink-0 flex items-center justify-center z-5"
+        />
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none z-10"
+          viewBox="0 0 332 332"
+        >
+          <circle
+            cx="166"
+            cy="166"
+            r={arcRadius}
+            fill="none"
+            stroke="rgba(225, 29, 72, 0.65)"
+            strokeWidth="4"
+          />
+        </svg>
+
+        {/* 112 Acil Çağrı Merkezi Emblem Overlay harmonized with the 3D Rotating Earth */}
+        <div className="absolute inset-0 z-20 pointer-events-none flex flex-col items-center justify-between py-[5px] px-1">
+          {/* Top Ribbon: Selected Province Name (Giriş Ekranında Seçilen İl) */}
+          {cleanCityUpper ? (
+            <div className="px-2 py-[1.5px] rounded-full bg-gradient-to-r from-[#dc2626] via-[#e11d48] to-[#dc2626] border border-white/45 shadow-sm max-w-[78px] overflow-hidden">
+              <div className="text-[7.5px] font-black uppercase tracking-[0.11em] text-white leading-none truncate text-center">
+                {cleanCityUpper}
+              </div>
+            </div>
+          ) : (
+            <div className="h-[11px]" />
+          )}
+
+          {/* Center Hero "112" Typography over the rotating 3D Earth */}
+          <div
+            className="font-display text-[24px] sm:text-[26px] font-black tracking-[-0.04em] text-white leading-none -my-0.5"
+            style={{
+              textShadow:
+                '0 2px 8px rgba(225, 29, 72, 0.95), 0 1px 4px rgba(0, 0, 0, 0.98), 0 0 14px rgba(0, 0, 0, 0.9)',
+            }}
+          >
+            112
+          </div>
+
+          {/* Bottom White Emblem Band: ACİL / ÇAĞRI MERKEZİ (matching the official 112 logo language) */}
+          <div className="w-[74px] sm:w-[76px] rounded-b-xl rounded-t-[4px] bg-white/95 border border-rose-500/45 shadow-md px-1 py-[2.5px] flex flex-col items-center justify-center leading-none">
+            <span className="text-[8.5px] font-black tracking-[0.07em] text-[#e30613] leading-none">
+              ACİL
+            </span>
+            <span className="mt-[1px] text-[5.5px] font-extrabold tracking-[0.07em] text-[#e30613] leading-none whitespace-nowrap">
+              ÇAĞRI MERKEZİ
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

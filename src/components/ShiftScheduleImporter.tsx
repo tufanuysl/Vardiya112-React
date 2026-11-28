@@ -16,6 +16,8 @@ import {
 import { AppSettings, NoteItem, RefRecord, ShiftPresetId } from '../types';
 import { trDateFormatter } from '../shiftEngine';
 import { findMatchingGroupByName, formatTitleCaseTR } from '../storage';
+import { apiUrl } from '../utils/nativeBridge';
+import { getAuthHeaders } from '../firebase';
 
 export interface AnalyzedShiftData {
   documentSummary: string;
@@ -189,9 +191,9 @@ export const ShiftScheduleImporter: React.FC<ShiftScheduleImporterProps> = ({
       const now = new Date();
       const currentYearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-      const response = await fetch('/api/shift-schedule/analyze', {
+      const response = await fetch(apiUrl('/api/shift-schedule/analyze'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           mimeType,
           base64Data,
@@ -200,6 +202,13 @@ export const ShiftScheduleImporter: React.FC<ShiftScheduleImporterProps> = ({
           currentYearMonth,
         }),
       });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error(
+          'Analiz sunucusuna ulaşılamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.'
+        );
+      }
 
       const data = await response.json();
       if (!response.ok || data.error) {
@@ -262,11 +271,14 @@ export const ShiftScheduleImporter: React.FC<ShiftScheduleImporterProps> = ({
           result.detectedSystem.is24HourSystem !== settings.is24HourSystem);
       setApplySystemHours(Boolean(sysDiffers));
     } catch (err: unknown) {
-      setErrorMsg(
-        err instanceof Error
-          ? err.message
-          : 'Belge analiz edilirken bir sorun oluştu. Lütfen daha net bir fotoğraf veya PDF deneyin.'
-      );
+      const rawMessage = err instanceof Error ? err.message : '';
+      const friendlyMessage = /failed to fetch|networkerror|load failed|unexpected token/i.test(
+        rawMessage
+      )
+        ? 'Sunucuya bağlanılamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.'
+        : rawMessage ||
+          'Belge analiz edilirken bir sorun oluştu. Lütfen daha net bir fotoğraf veya PDF deneyin.';
+      setErrorMsg(friendlyMessage);
       setAnalysisResult(null);
     } finally {
       setIsAnalyzing(false);
@@ -457,7 +469,7 @@ export const ShiftScheduleImporter: React.FC<ShiftScheduleImporterProps> = ({
       <input
         ref={fileInputRef}
         type="file"
-        accept="application/pdf,image/png,image/jpeg,image/jpg,image/webp,.pdf"
+        accept="application/pdf,image/*,.pdf"
         onChange={handleFileChange}
         className="hidden"
       />

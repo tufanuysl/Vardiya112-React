@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { User } from 'firebase/auth';
 import {
   AppSettings,
+  InstitutionUnitDoc,
   NoteItem,
-  NotificationSoundId,
   RefRecord,
   ShiftPresetOption,
+  UnitProfileLockDoc,
   UserProfile,
 } from '../types';
 import {
@@ -12,16 +14,31 @@ import {
   toISODate,
   runBuiltInTests,
   querySingleDayForGroup,
+  groupConsecutiveRecords,
 } from '../shiftEngine';
 import {
   SHIFT_PRESETS,
   formatMemberListTitleCaseTR,
   formatTitleCaseTR,
 } from '../storage';
-import { playNotificationChime } from './ToastNotification';
+import { requestSystemNotificationPermission } from './ToastNotification';
 import { ShiftScheduleImporter } from './ShiftScheduleImporter';
 import { ProfileManagerModal } from './ProfileManagerModal';
-import { THEME_PRESETS, getThemePreset, isLightTheme } from '../themes';
+import { THEME_PRESETS, calculateSunTimes, getThemePreset, isLightTheme } from '../themes';
+import {
+  apiUrl,
+  blobToBase64,
+  getNativeSpeechRecognitionPlugin,
+  isCapacitorNative,
+  requestCurrentLocation,
+  shareOrOpenNativeFile,
+} from '../utils/nativeBridge';
+import { getAuthHeaders } from '../firebase';
+import {
+  DEFAULT_WEATHER_CITY,
+  findNearestProvinceByCoords,
+  TURKISH_PROVINCES,
+} from '../utils/weather';
 import {
   ChevronRight,
   ChevronLeft,
@@ -32,6 +49,7 @@ import {
   Minus,
   Mic,
   MicOff,
+  Loader2,
   Download,
   Upload,
   Copy,
@@ -42,11 +60,16 @@ import {
   Bell,
   Database,
   CheckCircle2,
-  Sparkles,
   FileText,
   Info,
   Activity,
   Palette,
+  Sun,
+  Moon,
+  MapPin,
+  LogOut,
+  RefreshCw,
+  Building2,
 } from 'lucide-react';
 
 interface SettingsTabProps {
@@ -67,11 +90,20 @@ interface SettingsTabProps {
   onDeleteProfile: (profileId: string) => void;
   onDeleteRef: (idx: number) => void;
   onResetAll: () => void;
+  onResyncFromServer?: () => Promise<void>;
   onLockSystem?: () => void;
-  onOpenSetupModal: () => void;
   onOpenDevModal: () => void;
   onOpenTestModal: () => void;
-  onTriggerTestToast?: () => void;
+  activeUnit?: InstitutionUnitDoc | null;
+  activeUnitProfileLocks?: UnitProfileLockDoc[];
+  currentUser?: User | null;
+  isAuthorizedAdmin?: boolean;
+  onOpenFirstLaunchScreen?: () => void;
+  onOpenBureauModal?: (
+    section?: 'units' | 'identity' | 'shift_ref' | 'personnel' | 'records' | 'admins'
+  ) => void;
+  onTriggerToast?: (title: string, message: string) => void;
+  onTriggerTestReminder?: (title: string, message: string) => void;
   onClose?: () => void;
 }
 
@@ -82,6 +114,7 @@ type SettingsSubPage =
   | 'shift-hours'
   | 'groups'
   | 'notes'
+  | 'themes'
   | 'backup'
   | 'diagnostics'
   | 'about';
@@ -110,9 +143,18 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   onDeleteProfile,
   onDeleteRef,
   onResetAll,
-  onTriggerTestToast,
+  onResyncFromServer,
+  activeUnit = null,
+  activeUnitProfileLocks = [],
+  currentUser = null,
+  isAuthorizedAdmin = false,
+  onOpenFirstLaunchScreen,
+  onOpenBureauModal,
+  onTriggerToast,
+  onTriggerTestReminder,
   onClose,
 }) => {
+  const isAdminMode = settings.appRoleMode === 'admin';
   const isLight = isLightTheme(settings.theme);
   const currentThemePreset = getThemePreset(settings.theme);
   const activeProfile =
@@ -121,6 +163,17 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [activePage, setActivePage] = useState<SettingsSubPage>('main');
   const [statusFeedback, setStatusFeedback] = useState<string | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [showAdvancedResetZone, setShowAdvancedResetZone] = useState(false);
+  const [resetConfirmChecked, setResetConfirmChecked] = useState(false);
+  const [isResyncingServer, setIsResyncingServer] = useState(false);
+  const [locatingSun, setLocatingSun] = useState(false);
+  const [notifPermission, setNotifPermission] = useState<string>(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+  });
+  const sunTimes = calculateSunTimes(new Date(), settings.autoThemeLat, settings.autoThemeLng);
+  const lightThemes = THEME_PRESETS.filter((t) => t.isLight);
+  const darkThemes = THEME_PRESETS.filter((t) => !t.isLight);
 
   // Reference Setup State
   const primaryRef = refHistory[0] || {
@@ -158,10 +211,18 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     primaryRef.myGroupIdx >= 0 ? primaryRef.myGroupIdx : 0
   );
   const [listeningGroupIdx, setListeningGroupIdx] = useState<number | null>(null);
+  const [voiceModeLabel, setVoiceModeLabel] = useState<'none' | 'native' | 'web-speech' | 'recorder'>('none');
+  const [isTranscribingVoice, setIsTranscribingVoice] = useState<boolean>(false);
   const [interimSpeech, setInterimSpeech] = useState<string>('');
   const [voiceErrorMsg, setVoiceErrorMsg] = useState<string | null>(null);
   const [quickDictationText, setQuickDictationText] = useState<string>('');
   const recognitionRef = useRef<any>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordAutoStopTimerRef = useRef<number | null>(null);
+  const activeVoiceModeRef = useRef<'none' | 'native' | 'web-speech' | 'recorder'>('none');
+  const nativePartialListenerRef = useRef<any>(null);
   const shouldKeepListeningRef = useRef<number | null>(null);
   const uncommittedInterimRef = useRef<string>('');
   const pauseCommitTimerRef = useRef<number | null>(null);
@@ -184,35 +245,84 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       window.clearTimeout(dictationTimerRef.current);
       dictationTimerRef.current = null;
     }
+    if (recordAutoStopTimerRef.current !== null) {
+      window.clearTimeout(recordAutoStopTimerRef.current);
+      recordAutoStopTimerRef.current = null;
+    }
+  };
+
+  const cleanupMediaStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      });
+      mediaStreamRef.current = null;
+    }
+  };
+
+  const cleanupNativeSpeech = async () => {
+    if (nativePartialListenerRef.current) {
+      try {
+        await nativePartialListenerRef.current.remove?.();
+      } catch {
+        // ignore
+      }
+      nativePartialListenerRef.current = null;
+    }
+    const nativePlugin = getNativeSpeechRecognitionPlugin();
+    if (nativePlugin && activeVoiceModeRef.current === 'native') {
+      try {
+        await nativePlugin.stop?.();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const abortAllVoiceSessions = () => {
+    shouldKeepListeningRef.current = null;
+    clearVoiceTimers();
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      recognitionRef.current = null;
+    }
+    if (mediaRecorderRef.current) {
+      try {
+        mediaRecorderRef.current.onstop = null;
+        if (mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch {
+        // ignore
+      }
+      mediaRecorderRef.current = null;
+    }
+    audioChunksRef.current = [];
+    cleanupMediaStream();
+    void cleanupNativeSpeech();
+    activeVoiceModeRef.current = 'none';
+    setVoiceModeLabel('none');
+    setListeningGroupIdx(null);
+    setInterimSpeech('');
   };
 
   useEffect(() => {
     if (activePage !== 'groups') {
-      shouldKeepListeningRef.current = null;
-      clearVoiceTimers();
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
-      setListeningGroupIdx(null);
-      setInterimSpeech('');
+      abortAllVoiceSessions();
     }
   }, [activePage]);
 
   useEffect(() => {
     return () => {
-      shouldKeepListeningRef.current = null;
-      clearVoiceTimers();
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {
-          // ignore
-        }
-      }
+      abortAllVoiceSessions();
     };
   }, []);
 
@@ -346,17 +456,228 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
+  const transcribeRecordedAudio = async (groupIdx: number, audioBlob: Blob) => {
+    if (!audioBlob || audioBlob.size < 400) {
+      setVoiceErrorMsg('Ses kaydı çok kısa. İsimleri söyleyip Durdur butonuna basın.');
+      return;
+    }
+
+    setIsTranscribingVoice(true);
+    setVoiceErrorMsg(null);
+    try {
+      const base64Data = await blobToBase64(audioBlob);
+      const mimeType = audioBlob.type || 'audio/webm';
+      const response = await fetch(apiUrl('/api/voice/transcribe'), {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ base64Data, mimeType }),
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        throw new Error('Ses çözümleme sunucusuna ulaşılamadı. İnternet bağlantınızı kontrol edin.');
+      }
+
+      const data = (await response.json()) as { transcript?: string; error?: string };
+      if (!response.ok || data.error) {
+        throw new Error(data.error || 'Ses metne çevrilemedi.');
+      }
+
+      const transcript = String(data.transcript || '').trim();
+      const parsed = parseSpokenNamesToPeople(transcript);
+      if (parsed.length > 0) {
+        appendPeopleToGroup(groupIdx, parsed);
+        showTemporaryFeedback(`+ ${parsed.join(', ')}`);
+      } else {
+        setVoiceErrorMsg('Konuşmada isim algılanamadı. Mikrofona yakın konuşup tekrar deneyin.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      setVoiceErrorMsg(
+        /failed to fetch|networkerror|load failed/i.test(msg)
+          ? 'İnternet bağlantısı yok. Ses çözümleme için bağlantı gerekir veya aşağıdaki kutuyu kullanabilirsiniz.'
+          : msg || 'Ses metne çevrilemedi. Tekrar deneyin.'
+      );
+    } finally {
+      setIsTranscribingVoice(false);
+    }
+  };
+
+  const startAudioRecorderFallback = async (groupIdx: number): Promise<boolean> => {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function' ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      return false;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      const candidateTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      const chosenType = candidateTypes.find(
+        (t) => typeof MediaRecorder.isTypeSupported === 'function' && MediaRecorder.isTypeSupported(t)
+      );
+
+      const recorder = chosenType
+        ? new MediaRecorder(stream, { mimeType: chosenType })
+        : new MediaRecorder(stream);
+
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (ev: BlobEvent) => {
+        if (ev.data && ev.data.size > 0) {
+          audioChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const chunks = [...audioChunksRef.current];
+        audioChunksRef.current = [];
+        const finalType = recorder.mimeType || chosenType || 'audio/webm';
+        cleanupMediaStream();
+        mediaRecorderRef.current = null;
+        activeVoiceModeRef.current = 'none';
+        setVoiceModeLabel('none');
+        setListeningGroupIdx(null);
+        setInterimSpeech('');
+        if (chunks.length > 0) {
+          const audioBlob = new Blob(chunks, { type: finalType });
+          void transcribeRecordedAudio(groupIdx, audioBlob);
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      activeVoiceModeRef.current = 'recorder';
+      setVoiceModeLabel('recorder');
+      shouldKeepListeningRef.current = groupIdx;
+      setListeningGroupIdx(groupIdx);
+      setInterimSpeech('');
+      setVoiceErrorMsg(null);
+      recorder.start(250);
+      showTemporaryFeedback('Ses kaydediliyor...');
+
+      // Auto-stop after 20 seconds so recording never hangs
+      recordAutoStopTimerRef.current = window.setTimeout(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          try {
+            mediaRecorderRef.current.stop();
+          } catch {
+            // ignore
+          }
+        }
+      }, 20000);
+
+      return true;
+    } catch (err: unknown) {
+      cleanupMediaStream();
+      const errName = err instanceof Error ? err.name : '';
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        setVoiceErrorMsg(
+          isCapacitorNative()
+            ? 'Mikrofon izni verilmedi. Telefon Ayarları > Uygulamalar > Vardiya 112 > İzinler bölümünden Mikrofon iznini açın.'
+            : 'Mikrofon izni verilmedi. Tarayıcı adres çubuğundan mikrofon iznini açın.'
+        );
+      } else {
+        setVoiceErrorMsg('Mikrofon başlatılamadı. Cihaz mikrofon iznini kontrol edin.');
+      }
+      return false;
+    }
+  };
+
+  const startNativeCapacitorSpeech = async (groupIdx: number): Promise<boolean> => {
+    const nativePlugin = getNativeSpeechRecognitionPlugin();
+    if (!nativePlugin || typeof nativePlugin.start !== 'function') {
+      return false;
+    }
+
+    try {
+      if (typeof nativePlugin.available === 'function') {
+        const avail = await nativePlugin.available();
+        if (avail && avail.available === false) return false;
+      }
+
+      if (typeof nativePlugin.requestPermissions === 'function') {
+        const perm = await nativePlugin.requestPermissions();
+        if (perm && perm.speechRecognition === 'denied') {
+          setVoiceErrorMsg(
+            'Mikrofon izni reddedildi. Uygulama ayarlarından Mikrofon iznini açın.'
+          );
+          return true;
+        }
+      }
+
+      activeVoiceModeRef.current = 'native';
+      setVoiceModeLabel('native');
+      shouldKeepListeningRef.current = groupIdx;
+      setListeningGroupIdx(groupIdx);
+      setInterimSpeech('');
+      setVoiceErrorMsg(null);
+      showTemporaryFeedback('Dinleniyor...');
+
+      let lastPartial = '';
+      if (typeof nativePlugin.addListener === 'function') {
+        nativePartialListenerRef.current = await nativePlugin.addListener(
+          'partialResults',
+          (data: { matches?: string[] }) => {
+            const first = data?.matches?.[0] || '';
+            if (first) {
+              lastPartial = first;
+              uncommittedInterimRef.current = first;
+              setInterimSpeech(first);
+            }
+          }
+        );
+      }
+
+      const result = await nativePlugin.start({
+        language: 'tr-TR',
+        maxResults: 1,
+        prompt: 'Personel isimlerini söyleyin',
+        partialResults: true,
+        popup: false,
+      });
+
+      const spokenText = (result?.matches?.[0] || lastPartial || '').trim();
+      await cleanupNativeSpeech();
+      activeVoiceModeRef.current = 'none';
+      setVoiceModeLabel('none');
+      shouldKeepListeningRef.current = null;
+      setListeningGroupIdx(null);
+      uncommittedInterimRef.current = '';
+      setInterimSpeech('');
+
+      if (spokenText) {
+        const parsed = parseSpokenNamesToPeople(spokenText);
+        if (parsed.length > 0) {
+          appendPeopleToGroup(groupIdx, parsed);
+          showTemporaryFeedback(`+ ${parsed.join(', ')}`);
+        }
+      }
+      return true;
+    } catch {
+      await cleanupNativeSpeech();
+      activeVoiceModeRef.current = 'none';
+      setVoiceModeLabel('none');
+      setListeningGroupIdx(null);
+      return false;
+    }
+  };
+
   const startRecognitionInstance = (groupIdx: number) => {
     const SpeechRecognitionAPI =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognitionAPI) {
-      setVoiceErrorMsg(
-        'Tarayıcı doğrudan ses tanımayı desteklemiyor. Aşağıdaki kutuya dokunup klavye mikrofonuyla söyleyebilirsiniz.'
-      );
-      setListeningGroupIdx(null);
-      shouldKeepListeningRef.current = null;
-      window.setTimeout(() => quickInputRef.current?.focus(), 80);
+      // Automatically switch to MediaRecorder + AI transcription (works in Capacitor Android WebView)
+      void startAudioRecorderFallback(groupIdx);
       return;
     }
 
@@ -368,6 +689,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       recognition.maxAlternatives = 1;
 
       recognition.onstart = () => {
+        activeVoiceModeRef.current = 'web-speech';
+        setVoiceModeLabel('web-speech');
         setListeningGroupIdx(groupIdx);
         setVoiceErrorMsg(null);
       };
@@ -423,17 +746,30 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         const err = event?.error;
         if (err === 'not-allowed' || err === 'service-not-allowed') {
           shouldKeepListeningRef.current = null;
+          activeVoiceModeRef.current = 'none';
+          setVoiceModeLabel('none');
           setListeningGroupIdx(null);
           setInterimSpeech('');
           setVoiceErrorMsg(
-            'Mikrofon izni engellendi. Aşağıdaki hızlı ekleme kutusunda klavye mikrofonunu kullanabilirsiniz.'
+            isCapacitorNative()
+              ? 'Mikrofon izni engellendi. Uygulama izinlerinden Mikrofonu açın.'
+              : 'Mikrofon izni engellendi. Aşağıdaki hızlı ekleme kutusunu kullanabilirsiniz.'
           );
           window.setTimeout(() => quickInputRef.current?.focus(), 80);
         } else if (err === 'audio-capture') {
           shouldKeepListeningRef.current = null;
+          activeVoiceModeRef.current = 'none';
+          setVoiceModeLabel('none');
           setListeningGroupIdx(null);
           setInterimSpeech('');
           setVoiceErrorMsg('Mikrofon cihazı bulunamadı.');
+        } else if (err === 'network' || err === 'language-not-supported') {
+          // Fall back to universal MediaRecorder if Web Speech engine fails
+          shouldKeepListeningRef.current = null;
+          activeVoiceModeRef.current = 'none';
+          setVoiceModeLabel('none');
+          setListeningGroupIdx(null);
+          void startAudioRecorderFallback(groupIdx);
         }
       };
 
@@ -446,6 +782,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             }
           }, 120);
         } else {
+          activeVoiceModeRef.current = 'none';
+          setVoiceModeLabel('none');
           setListeningGroupIdx((prev) => (prev === groupIdx ? null : prev));
           setInterimSpeech('');
         }
@@ -454,21 +792,42 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       recognitionRef.current = recognition;
       recognition.start();
     } catch {
-      shouldKeepListeningRef.current = null;
-      setListeningGroupIdx(null);
-      setVoiceErrorMsg(
-        'Sesli giriş başlatılamadı. Aşağıdaki kutuda klavye mikrofonunu kullanabilirsiniz.'
-      );
-      window.setTimeout(() => quickInputRef.current?.focus(), 80);
+      // Fallback to MediaRecorder + AI transcription
+      void startAudioRecorderFallback(groupIdx);
     }
   };
 
   const handleToggleVoiceInput = async (groupIdx: number) => {
     setVoiceErrorMsg(null);
+    if (isTranscribingVoice) return;
 
+    // STOP currently active session
     if (listeningGroupIdx === groupIdx || shouldKeepListeningRef.current === groupIdx) {
       shouldKeepListeningRef.current = null;
       clearVoiceTimers();
+
+      if (activeVoiceModeRef.current === 'recorder' && mediaRecorderRef.current) {
+        if (mediaRecorderRef.current.state === 'recording') {
+          try {
+            mediaRecorderRef.current.stop();
+          } catch {
+            abortAllVoiceSessions();
+          }
+          return;
+        }
+      }
+
+      if (activeVoiceModeRef.current === 'native') {
+        flushUncommittedInterim(groupIdx);
+        await cleanupNativeSpeech();
+        activeVoiceModeRef.current = 'none';
+        setVoiceModeLabel('none');
+        setListeningGroupIdx(null);
+        setInterimSpeech('');
+        showTemporaryFeedback('Sesle ekleme tamamlandı');
+        return;
+      }
+
       flushUncommittedInterim(groupIdx);
       if (recognitionRef.current) {
         try {
@@ -477,40 +836,59 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           // ignore
         }
       }
+      activeVoiceModeRef.current = 'none';
+      setVoiceModeLabel('none');
       setListeningGroupIdx(null);
       setInterimSpeech('');
       showTemporaryFeedback('Sesle ekleme tamamlandı');
       return;
     }
 
-    shouldKeepListeningRef.current = null;
-    clearVoiceTimers();
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // ignore
-      }
+    // Abort any other group's active voice session
+    abortAllVoiceSessions();
+
+    // Layer 1: Native Capacitor SpeechRecognition plugin (if installed in APK)
+    if (getNativeSpeechRecognitionPlugin()) {
+      const handledNative = await startNativeCapacitorSpeech(groupIdx);
+      if (handledNative) return;
     }
 
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-      } catch {
-        setVoiceErrorMsg(
-          'Mikrofon izni verilmedi. Aşağıdaki kutuda klavye mikrofonunu kullanabilirsiniz.'
-        );
-        window.setTimeout(() => quickInputRef.current?.focus(), 80);
-        return;
+    // Layer 2: Browser Web Speech API (Chrome/Safari/Edge)
+    const SpeechRecognitionAPI =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (SpeechRecognitionAPI) {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((track) => track.stop());
+        } catch {
+          setVoiceErrorMsg(
+            isCapacitorNative()
+              ? 'Mikrofon izni verilmedi. Telefon Ayarları > Uygulamalar > Vardiya 112 > İzinler bölümünden Mikrofon iznini açın.'
+              : 'Mikrofon izni verilmedi. Aşağıdaki kutuda klavye mikrofonunu kullanabilirsiniz.'
+          );
+          window.setTimeout(() => quickInputRef.current?.focus(), 80);
+          return;
+        }
       }
+
+      shouldKeepListeningRef.current = groupIdx;
+      setListeningGroupIdx(groupIdx);
+      setInterimSpeech('');
+      showTemporaryFeedback('Dinleniyor...');
+      startRecognitionInstance(groupIdx);
+      return;
     }
 
-    shouldKeepListeningRef.current = groupIdx;
-    setListeningGroupIdx(groupIdx);
-    setInterimSpeech('');
-    showTemporaryFeedback('Dinleniyor...');
-    startRecognitionInstance(groupIdx);
+    // Layer 3: Universal MediaRecorder + Cloud AI Transcription (works inside Capacitor Android WebView!)
+    const startedRecorder = await startAudioRecorderFallback(groupIdx);
+    if (!startedRecorder) {
+      setVoiceErrorMsg(
+        'Mikrofon başlatılamadı. Uygulama mikrofon iznini kontrol edin veya aşağıdaki kutuyu kullanın.'
+      );
+      window.setTimeout(() => quickInputRef.current?.focus(), 80);
+    }
   };
 
   const handleCommitQuickDictation = (groupIdx: number, rawValue?: string) => {
@@ -576,6 +954,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           })${partnerPart} ile değiştirildi.`
         : noteDesc.trim() || noteType;
 
+    const resolvedOwner =
+      cleanMy ||
+      (settings.activeWorkerName || '').trim() ||
+      (activeProfile?.name && activeProfile.name !== 'Ana Profilim'
+        ? activeProfile.name.trim()
+        : '');
+
+    const curGroupIdx =
+      refHistory.length > 0 ? refHistory[refHistory.length - 1].myGroupIdx : 0;
+
     const newNote: NoteItem = {
       id: Date.now(),
       date: noteDate,
@@ -585,7 +973,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       swapTargetDate: noteType === 'Nöbet Değişimi' ? swapTargetDate : '',
       swapShiftType: noteType === 'Nöbet Değişimi' ? swapShiftType : 'GUNDUZ',
       swapWithPerson: noteType === 'Nöbet Değişimi' ? cleanWith : undefined,
-      swapMyPerson: noteType === 'Nöbet Değişimi' ? cleanMy : undefined,
+      swapMyPerson: resolvedOwner || undefined,
+      targetGroupIdx: curGroupIdx,
     };
 
     const updatedNotes = [...notes, newNote];
@@ -635,13 +1024,30 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     );
   };
 
-  const handleDownloadBackup = () => {
+  const handleDownloadBackup = async () => {
     const dataStr = buildBackupPayload();
+    const fileName = `vardiya112_yedek_${toISODate(new Date())}.json`;
+
+    if (isCapacitorNative()) {
+      const nativeRes = await shareOrOpenNativeFile({
+        fileName,
+        mimeType: 'application/json',
+        textContent: dataStr,
+        title: 'Vardiya 112 Yedek',
+        text: 'Vardiya 112 JSON Yedek Dosyası',
+        dialogTitle: 'Yedek Dosyasını Kaydet / Paylaş',
+      });
+      if (nativeRes.handled) {
+        showTemporaryFeedback('Yedek paylaşıldı');
+        return;
+      }
+    }
+
     const blob = new Blob([dataStr], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `vardiya112_yedek_${toISODate(new Date())}.json`;
+    link.download = fileName;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -699,6 +1105,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     'shift-hours': 'Nöbet Referansı ve Vardiya Saatleri',
     groups: 'Gruplar ve Personel',
     notes: 'Becayiş ve Notlar',
+    themes: 'Görünüm ve Temalar',
     backup: 'Yedekleme',
     diagnostics: 'Sistem Doğrulama',
     about: 'Hakkında',
@@ -810,7 +1217,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       </div>
 
       {/* =====================================================================
-          MAIN SETTINGS DASHBOARD (Sistematik, Kategorize ve İlk Kurulum Rehberli)
+          MAIN SETTINGS DASHBOARD (STANDARD GROUPED SETTINGS UI)
          ===================================================================== */}
       {activePage === 'main' && (() => {
         const totalPersonnelCount = settings.groupMembers
@@ -822,687 +1229,530 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               .filter(Boolean).length;
             return acc + count;
           }, 0);
-        const hasReference = refHistory.length > 0;
-        const hasPersonnel = totalPersonnelCount > 0;
-        const completedSteps = (hasReference ? 1 : 0) + (hasPersonnel ? 1 : 0) + 1;
-        const activePresetObj = SHIFT_PRESETS.find(
-          (p) => p.id === (settings.shiftPreset || '112_5G')
-        );
 
         const cardBoxClass = isLight
-          ? 'bg-white border-slate-200/80 shadow-xs'
-          : 'bg-slate-900/45 border-slate-800/80';
+          ? 'bg-white border-slate-200/85 shadow-2xs'
+          : 'bg-slate-900/55 border-slate-800/85';
+
+        const iconBoxClass = (color: 'sky' | 'emerald' | 'indigo' | 'amber' | 'rose' | 'purple' | 'slate') => {
+          const map = {
+            sky: isLight ? 'bg-sky-500/12 text-sky-600' : 'bg-sky-500/15 text-sky-400',
+            emerald: isLight ? 'bg-emerald-500/12 text-emerald-600' : 'bg-emerald-500/15 text-emerald-400',
+            indigo: isLight ? 'bg-indigo-500/12 text-indigo-600' : 'bg-indigo-500/15 text-indigo-400',
+            amber: isLight ? 'bg-amber-500/12 text-amber-600' : 'bg-amber-500/15 text-amber-400',
+            rose: isLight ? 'bg-rose-500/12 text-rose-600' : 'bg-rose-500/15 text-rose-400',
+            purple: isLight ? 'bg-purple-500/12 text-purple-600' : 'bg-purple-500/15 text-purple-400',
+            slate: isLight ? 'bg-slate-200/70 text-slate-700' : 'bg-slate-800 text-slate-300',
+          };
+          return `w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${map[color]}`;
+        };
 
         return (
-          <div className="flex flex-col gap-5 pb-6 animate-fade-in">
-            {/* A. İLK KULLANICI HIZLI KURULUM REHBERİ (3 ADIMDA SİSTEMATİK KURULUM) */}
-            <section
-              className={`p-3.5 rounded-2xl border flex flex-col gap-3 ${
-                isLight
-                  ? 'bg-gradient-to-br from-sky-50/90 via-white to-indigo-50/60 border-sky-200/80 shadow-xs'
-                  : 'bg-gradient-to-br from-sky-950/30 via-slate-900/70 to-indigo-950/25 border-sky-500/25'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div
-                    className={`w-7 h-7 rounded-xl flex items-center justify-center shrink-0 ${
-                      isLight
-                        ? 'bg-sky-500/15 text-sky-600'
-                        : 'bg-sky-500/20 text-sky-400'
-                    }`}
-                  >
-                    <Sparkles className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="text-xs font-extrabold tracking-tight">
-                      Hızlı Kurulum Rehberi
-                    </h3>
-                    <p className="text-[10px] text-slate-400 truncate">
-                      İlk kurulum için aşağıdaki 3 adımı sırasıyla kontrol edin
-                    </p>
-                  </div>
-                </div>
+          <div className="flex flex-col gap-4 pb-5 animate-fade-in">
+            {/* =================================================================
+                1. HESAP & KURUM KARTI (PERSONEL vs YÖNETİCİ)
+               ================================================================= */}
+            <section>
+              <div className="flex items-center justify-between mb-1.5 px-1">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                  {isAdminMode ? 'Yönetici & Kurum Bilgisi' : 'Profilim & Kurum'}
+                </span>
                 <span
-                  className={`px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0 ${
-                    completedSteps === 3
-                      ? isLight
-                        ? 'bg-emerald-500/15 text-emerald-700'
-                        : 'bg-emerald-500/20 text-emerald-300'
-                      : isLight
-                      ? 'bg-amber-500/15 text-amber-700'
-                      : 'bg-amber-500/20 text-amber-300'
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                    isAdminMode
+                      ? 'bg-rose-500/15 text-rose-400 border border-rose-500/25'
+                      : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
                   }`}
                 >
-                  {completedSteps}/3 Adım Hazır
+                  {isAdminMode ? 'Yönetici Modu' : 'Personel Modu'}
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 gap-2">
-                {/* Adım 1: Nöbet Referansı */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRefSetupMode('manual');
-                    setActivePage('reference');
-                  }}
-                  className={`w-full p-2.5 rounded-xl border flex items-center justify-between gap-2.5 text-left transition cursor-pointer ${
-                    isLight
-                      ? 'bg-white/90 hover:bg-sky-50/60 border-slate-200/80'
-                      : 'bg-slate-900/65 hover:bg-slate-800/70 border-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className={`w-6 h-6 rounded-full text-[11px] font-black flex items-center justify-center shrink-0 ${
-                        hasReference
-                          ? 'bg-emerald-500 text-white'
-                          : 'bg-sky-500 text-white'
-                      }`}
+              <div className={`rounded-2xl border px-3.5 ${cardBoxClass} ${listDivideClass}`}>
+                {!isAdminMode ? (
+                  <>
+                    {/* Personel Profil Satırı */}
+                    <button
+                      type="button"
+                      onClick={() => setActivePage('profiles')}
+                      className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
                     >
-                      1
-                    </span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold truncate">
-                        Nöbet Referansı ve Vardiya Düzenini Seçin
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={iconBoxClass('emerald')}>
+                          <Users className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-extrabold truncate">
+                            {settings.activeWorkerName || activeProfile?.name || 'Profil Seçilmedi'}
+                          </div>
+                          <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                            {activeUnit?.name || settings.activeUnitName || 'Kurum Kaydı'} ·{' '}
+                            <strong className="text-emerald-500">{activeGroupName}</strong>
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[10px] text-slate-400 truncate">
-                        {hasReference
-                          ? `${activeGroupName} · ${trDateFormatter(primaryRef.refDate)} (${
-                              primaryRef.refType === 'GUNDUZ' ? 'Gündüz' : 'Gece'
-                            })`
-                          : 'Grubunuzu ve bildiğiniz 1 nöbet gününüzü girin veya PDF yükleyin'}
+                      <div className="flex items-center gap-1 text-slate-400 group-hover:text-sky-500 transition shrink-0">
+                        <span className="text-[11px] font-semibold">Profilim</span>
+                        <ChevronRight className="w-4 h-4" />
                       </div>
-                    </div>
-                  </div>
-                  <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
-                      hasReference
-                        ? 'bg-emerald-500/15 text-emerald-500'
-                        : 'bg-sky-500/15 text-sky-500'
-                    }`}
-                  >
-                    {hasReference ? 'Hazır ✓' : 'Kur →'}
-                  </span>
-                </button>
+                    </button>
 
-                {/* Adım 2: Gruplar ve Personel */}
-                <button
-                  type="button"
-                  onClick={() => setActivePage('groups')}
-                  className={`w-full p-2.5 rounded-xl border flex items-center justify-between gap-2.5 text-left transition cursor-pointer ${
-                    isLight
-                      ? 'bg-white/90 hover:bg-sky-50/60 border-slate-200/80'
-                      : 'bg-slate-900/65 hover:bg-slate-800/70 border-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span
-                      className={`w-6 h-6 rounded-full text-[11px] font-black flex items-center justify-center shrink-0 ${
-                        hasPersonnel
-                          ? 'bg-emerald-500 text-white'
-                          : 'bg-amber-500 text-white'
-                      }`}
+                    {/* Vardiya Özeti (Kompakt Tek Satır) */}
+                    <div className="py-2.5 flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-slate-400 font-medium">Vardiya Düzeni</span>
+                      <span className="font-bold truncate">
+                        {settings.is24HourSystem
+                          ? `24 Saat (${settings.shift24Start})`
+                          : `${settings.dayStart}–${settings.dayEnd} / ${settings.nightStart}–${settings.nightEnd}`}{' '}
+                        · {settings.numGroups} Grup
+                      </span>
+                    </div>
+
+                    {/* Birden Fazla Profil Varsa Hızlı Geçiş */}
+                    {profiles.length > 1 && (
+                      <div className="py-2.5 flex items-center gap-1.5 overflow-x-auto">
+                        <span className="text-[10px] font-semibold text-slate-400 shrink-0 mr-1">
+                          Profiller:
+                        </span>
+                        {profiles.map((p) => {
+                          const isAct = p.id === activeProfileId;
+                          const pGroup =
+                            settings.groupNames[p.groupIdx] || `${p.groupIdx + 1}. Grup`;
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectProfile(p.id);
+                                showTemporaryFeedback(`${p.name} seçildi`);
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[10.5px] font-bold shrink-0 transition cursor-pointer ${
+                                isAct
+                                  ? 'bg-emerald-600 text-white shadow-2xs'
+                                  : secondaryBtnClass
+                              }`}
+                            >
+                              {p.name} ({pGroup})
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Kişisel Notlar ve Nöbet Değişimlerim */}
+                    <button
+                      type="button"
+                      onClick={() => setActivePage('notes')}
+                      className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
                     >
-                      2
-                    </span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold truncate">
-                        Gruplar ve Personel İsimlerini Tanımlayın
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={iconBoxClass('amber')}>
+                          <Calendar className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold">Nöbet Değişimi ve Notlarım</div>
+                          <div className="text-[10.5px] text-slate-400 truncate">
+                            Becayiş, izin ve kişisel takvim kayıtlarınız
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[10px] text-slate-400 truncate">
-                        {hasPersonnel
-                          ? `${settings.numGroups} Grupta toplam ${totalPersonnelCount} personel kayıtlı`
-                          : 'Gruplardaki ekip arkadaşlarınızı yazarak veya sesle ekleyin'}
+                      <div className="flex items-center gap-1 text-slate-400 group-hover:text-sky-500 transition shrink-0">
+                        {notes.length > 0 && (
+                          <span className="text-[11px] font-semibold">{notes.length}</span>
+                        )}
+                        <ChevronRight className="w-4 h-4" />
                       </div>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {/* Yönetici Hesabı ve Yetki Bilgisi */}
+                    <div className="py-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={iconBoxClass('rose')}>
+                          <ShieldCheck className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-extrabold truncate">
+                            {currentUser?.displayName || currentUser?.email || 'Kurum Yöneticisi'}
+                          </div>
+                          <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                            {currentUser?.email
+                              ? `${currentUser.email} · Yetkili Yönetici`
+                              : 'Yetkili yönetici oturumu aktif'}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-emerald-500/15 text-emerald-500 shrink-0">
+                        Aktif
+                      </span>
                     </div>
-                  </div>
-                  <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-md shrink-0 ${
-                      hasPersonnel
-                        ? 'bg-emerald-500/15 text-emerald-500'
-                        : 'bg-amber-500/15 text-amber-500'
-                    }`}
-                  >
-                    {hasPersonnel ? `${totalPersonnelCount} Kişi ✓` : 'Ekle →'}
-                  </span>
-                </button>
 
-                {/* Adım 3: Kullanıcı Profili & Otomatik Eşleştirme */}
-                <button
-                  type="button"
-                  onClick={() => setActivePage('profiles')}
-                  className={`w-full p-2.5 rounded-xl border flex items-center justify-between gap-2.5 text-left transition cursor-pointer ${
-                    isLight
-                      ? 'bg-white/90 hover:bg-sky-50/60 border-slate-200/80'
-                      : 'bg-slate-900/65 hover:bg-slate-800/70 border-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="w-6 h-6 rounded-full bg-emerald-500 text-white text-[11px] font-black flex items-center justify-center shrink-0">
-                      3
-                    </span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold truncate">
-                        Kullanıcı Profili ve Otomatik Grup Eşleşmesi
+                    {/* Aktif Kurum Özeti & Yönetici Paneli */}
+                    <div className="py-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={iconBoxClass('indigo')}>
+                          <Building2 className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs font-extrabold truncate">
+                            {activeUnit?.name || settings.activeUnitName || '112 Acil Çağrı Merkezi'}
+                          </div>
+                          <div className="text-[10.5px] text-slate-400 truncate mt-0.5">
+                            {settings.weatherCity || activeUnit?.city || 'İl Seçilmedi'} ·{' '}
+                            {settings.numGroups} Grup · {totalPersonnelCount} Personel ·{' '}
+                            {settings.is24HourSystem
+                              ? `24s (${settings.shift24Start})`
+                              : `${settings.dayStart}–${settings.dayEnd} / ${settings.nightStart}–${settings.nightEnd}`}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[10px] text-slate-400 truncate">
-                        Aktif: {activeProfile?.name || 'Ana Profilim'} ({activeGroupName}) · Çoklu profil desteği
-                      </div>
+
+                      {onOpenBureauModal && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onClose) onClose();
+                            onOpenBureauModal('units');
+                          }}
+                          className="px-3 py-1.5 rounded-xl text-[11px] font-bold bg-rose-600 hover:bg-rose-500 text-white shrink-0 transition cursor-pointer shadow-2xs"
+                        >
+                          Yönetici Paneli
+                        </button>
+                      )}
                     </div>
-                  </div>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-500 shrink-0">
-                    Onaylı ✓
-                  </span>
-                </button>
+                  </>
+                )}
               </div>
             </section>
 
-            {/* B. KULLANICI PROFİLLERİ VE HIZLI GEÇİŞ */}
+            {/* =================================================================
+                2. GÖRÜNÜM VE KONUM AYARLARI
+               ================================================================= */}
             <section>
-              <div className="flex items-center justify-between mb-1.5 px-0.5">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  1. Kullanıcı Profilleri
-                </span>
-                <span className="text-[10px] font-semibold text-emerald-500">
-                  {profiles.length} Kayıtlı Profil
+              <div className="flex items-center justify-between mb-1.5 px-1">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                  Görünüm ve Konum
                 </span>
               </div>
 
-              <div
-                className={`p-3.5 rounded-2xl border flex flex-col gap-3 ${cardBoxClass}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isLight
-                          ? 'bg-emerald-500/15 text-emerald-600'
-                          : 'bg-emerald-500/20 text-emerald-400'
-                      }`}
-                    >
-                      <Users className="w-4 h-4" />
+              <div className={`rounded-2xl border px-3.5 ${cardBoxClass} ${listDivideClass}`}>
+                {/* Tema Seçimi */}
+                <button
+                  type="button"
+                  onClick={() => setActivePage('themes')}
+                  className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={iconBoxClass('purple')}>
+                      <Palette className="w-4 h-4" />
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-extrabold truncate">
-                          {activeProfile?.name || 'Ana Profilim'}
-                        </span>
-                        <span className="flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-500">
-                          <ShieldCheck className="w-2.5 h-2.5" />
-                          Aktif
-                        </span>
+                      <div className="text-xs font-bold flex items-center gap-1.5">
+                        <span>Uygulama Teması</span>
+                        {settings.autoThemeEnabled && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-500">
+                            Otomatik
+                          </span>
+                        )}
                       </div>
-                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                        Grubu: <strong className="font-semibold">{activeGroupName}</strong> · İsimden otomatik grup eşleştirme
+                      <div className="text-[10.5px] text-slate-400 truncate">
+                        {currentThemePreset.name}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center -space-x-1">
+                      {currentThemePreset.previewSwatches.map((hex, idx) => (
+                        <span
+                          key={idx}
+                          className="w-3.5 h-3.5 rounded-full border border-white/30"
+                          style={{ backgroundColor: hex }}
+                        />
+                      ))}
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-sky-500 transition" />
+                  </div>
+                </button>
+
+                {/* Bulunulan İl Seçimi */}
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={iconBoxClass('sky')}>
+                      <MapPin className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold">Bulunulan İl</div>
+                      <div className="text-[10.5px] text-slate-400 truncate">
+                        {isAdminMode ? 'Kurum ili ve başlık etiketi' : 'Hava durumu ve konum ili'}
                       </div>
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setActivePage('profiles')}
-                    className="px-3 py-1.5 rounded-xl text-[11px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white shrink-0 transition cursor-pointer"
-                  >
-                    Profilleri Yönet
-                  </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={locatingSun}
+                      onClick={async () => {
+                        setLocatingSun(true);
+                        try {
+                          const coords = await requestCurrentLocation(10000);
+                          const nearest = findNearestProvinceByCoords(coords.lat, coords.lng);
+                          onUpdateSettings({
+                            ...settings,
+                            weatherCity: nearest.name,
+                            autoThemeLat: coords.lat,
+                            autoThemeLng: coords.lng,
+                          });
+                          showTemporaryFeedback(`${nearest.name} seçildi`);
+                        } catch {
+                          showTemporaryFeedback('Konum izni alınamadı');
+                        } finally {
+                          setLocatingSun(false);
+                        }
+                      }}
+                      className={`px-2 py-1.5 rounded-xl text-[11px] font-bold border flex items-center gap-1 transition cursor-pointer disabled:opacity-50 ${
+                        isLight
+                          ? 'bg-sky-50 hover:bg-sky-100 border-sky-200 text-sky-700'
+                          : 'bg-sky-950/60 hover:bg-sky-900/70 border-sky-500/40 text-sky-300'
+                      }`}
+                      title="GPS ile Bul"
+                    >
+                      <MapPin className="w-3 h-3" />
+                      <span>{locatingSun ? '...' : 'GPS'}</span>
+                    </button>
+
+                    <select
+                      value={settings.weatherCity || DEFAULT_WEATHER_CITY}
+                      onChange={(e) => {
+                        const nextCity = e.target.value;
+                        onUpdateSettings({ ...settings, weatherCity: nextCity });
+                        showTemporaryFeedback(`${nextCity} seçildi`);
+                      }}
+                      aria-label="Bulunulan İl Seçimi"
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border outline-none cursor-pointer shrink-0 max-w-[120px] ${
+                        isLight
+                          ? 'bg-slate-100 border-slate-200 text-slate-900'
+                          : 'bg-slate-800/90 border-slate-700 text-white'
+                      }`}
+                    >
+                      {TURKISH_PROVINCES.map((prov) => (
+                        <option
+                          key={prov.plate}
+                          value={prov.name}
+                          className="bg-slate-900 text-white"
+                        >
+                          {prov.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                {/* Hızlı Profil Geçiş Çipleri */}
-                {profiles.length > 1 && (
-                  <div className="flex items-center gap-1.5 overflow-x-auto pt-2 border-t border-slate-500/10">
-                    <span className="text-[10px] font-semibold text-slate-400 shrink-0 mr-1">
-                      Hızlı Geçiş:
-                    </span>
-                    {profiles.map((p) => {
-                      const isAct = p.id === activeProfileId;
-                      const pGroup =
-                        settings.groupNames[p.groupIdx] || `${p.groupIdx + 1}. Grup`;
-                      return (
-                        <button
-                          key={p.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectProfile(p.id);
-                            showTemporaryFeedback(`${p.name} profiline geçildi`);
-                          }}
-                          className={`px-2.5 py-1 rounded-xl text-[11px] font-bold shrink-0 transition cursor-pointer ${
-                            isAct
-                              ? 'bg-emerald-600 text-white shadow-xs'
-                              : secondaryBtnClass
-                          }`}
-                        >
-                          {p.name} ({pGroup})
-                        </button>
-                      );
-                    })}
+                {/* Sadece Personel Modunda: Açılış Sekmesi Tercihi */}
+                {!isAdminMode && (
+                  <div className="py-2.5 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={iconBoxClass('indigo')}>
+                        <Sun className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold">Açılış Sayfası</div>
+                        <div className="text-[10.5px] text-slate-400 truncate">
+                          Uygulama açıldığında ilk gösterilecek ekran
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      className={`flex items-center p-0.5 rounded-xl border shrink-0 ${
+                        isLight
+                          ? 'bg-slate-100 border-slate-200/80'
+                          : 'bg-slate-900 border-slate-800'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({ ...settings, defaultStartTab: 'home' });
+                          showTemporaryFeedback('Nöbet ekranı seçildi');
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                          (settings.defaultStartTab || 'home') === 'home'
+                            ? isLight
+                              ? 'bg-slate-900 text-white shadow-2xs'
+                              : 'bg-emerald-500 text-slate-950 shadow-2xs'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Nöbet
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({ ...settings, defaultStartTab: 'calendar' });
+                          showTemporaryFeedback('Takvim seçildi');
+                        }}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                          settings.defaultStartTab === 'calendar'
+                            ? isLight
+                              ? 'bg-slate-900 text-white shadow-2xs'
+                              : 'bg-emerald-500 text-slate-950 shadow-2xs'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Takvim
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
             </section>
 
-            {/* C. NÖBET, GRUP VE TAKVİM YÖNETİMİ */}
+            {/* =================================================================
+                3. BİLDİRİMLER & NÖBET HATIRLATICISI
+               ================================================================= */}
             <section>
-              <div className="flex items-center justify-between mb-1.5 px-0.5">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  2. Nöbet ve Vardiya Yönetimi
-                </span>
-                <span className="text-[10px] font-semibold text-sky-500">
-                  {activePresetObj?.shortBadge || 'Özel Düzen'}
+              <div className="flex items-center justify-between mb-1.5 px-1">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                  Bildirimler
                 </span>
               </div>
 
-              <div className={`rounded-2xl border px-3.5 ${cardBoxClass} ${listDivideClass}`}>
-                {/* Nöbet Referansı ve Vardiya Saatleri */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRefSetupMode('manual');
-                    setActivePage('reference');
-                  }}
-                  className="w-full py-3.5 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                >
+              <div className={`rounded-2xl border p-3.5 flex flex-col gap-2.5 ${cardBoxClass}`}>
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isLight
-                          ? 'bg-sky-500/15 text-sky-600'
-                          : 'bg-sky-500/20 text-sky-400'
-                      }`}
-                    >
-                      <Clock className="w-4 h-4" />
+                    <div className={iconBoxClass('emerald')}>
+                      <Bell className="w-4 h-4" />
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-xs font-bold">
-                          Nöbet Referansı ve Vardiya Saatleri
-                        </span>
-                        <span
-                          className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${
-                            isLight
-                              ? 'bg-emerald-500/15 text-emerald-700'
-                              : 'bg-emerald-500/20 text-emerald-300'
-                          }`}
-                        >
-                          Manuel + PDF/Fotoğraf
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                        {activeGroupName} · {trDateFormatter(primaryRef.refDate)} (
-                        {primaryRef.refType === 'GUNDUZ' ? 'Gündüz' : 'Gece'}) ·{' '}
-                        {settings.dayStart}-{settings.dayEnd} / {settings.nightStart}-
-                        {settings.nightEnd}
+                      <div className="text-xs font-bold">Nöbet Hatırlatıcı</div>
+                      <div className="text-[10.5px] text-slate-400 truncate">
+                        Vardiya başlamadan önce bildirim gönderir
                       </div>
                     </div>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-sky-500 transition shrink-0" />
-                </button>
 
-                {/* Gruplar ve Personel Listesi */}
-                <button
-                  type="button"
-                  onClick={() => setActivePage('groups')}
-                  className="w-full py-3.5 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isLight
-                          ? 'bg-indigo-500/15 text-indigo-600'
-                          : 'bg-indigo-500/20 text-indigo-400'
-                      }`}
+                  {notifPermission !== 'granted' && notifPermission !== 'unsupported' && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const res = await requestSystemNotificationPermission();
+                        setNotifPermission(res);
+                        showTemporaryFeedback(
+                          res === 'granted' ? 'Bildirim izni açıldı' : 'Tarayıcıdan izin verin'
+                        );
+                      }}
+                      className="px-2.5 py-1 rounded-lg text-[10.5px] font-bold bg-sky-600 hover:bg-sky-500 text-white transition cursor-pointer shrink-0"
                     >
-                      <Users className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold">Gruplar ve Personel Listesi</div>
-                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                        {settings.numGroups} Nöbet Grubu ·{' '}
-                        {totalPersonnelCount > 0
-                          ? `Toplam ${totalPersonnelCount} personel kayıtlı`
-                          : 'Henüz personel ismi girilmedi'}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400 group-hover:text-sky-500 transition shrink-0">
-                    <span className="text-[11px] font-semibold">
-                      {settings.numGroups} Grup
-                    </span>
-                    <ChevronRight className="w-4 h-4" />
-                  </div>
-                </button>
+                      İzni Aç
+                    </button>
+                  )}
+                </div>
 
-                {/* Becayiş ve Notlar */}
-                <button
-                  type="button"
-                  onClick={() => setActivePage('notes')}
-                  className="w-full py-3.5 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isLight
-                          ? 'bg-amber-500/15 text-amber-600'
-                          : 'bg-amber-500/20 text-amber-400'
-                      }`}
-                    >
-                      <Calendar className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold">
-                        Becayiş (Nöbet Değişimi) ve Notlar
-                      </div>
-                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                        Karşılıklı nöbet değişimi, icap, izin ve tarih bazlı referans zinciri
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400 group-hover:text-sky-500 transition shrink-0">
-                    <span className="text-[11px] font-semibold">
-                      {notes.length > 0 ? `${notes.length} Kayıt` : 'Ekle'}
-                    </span>
-                    <ChevronRight className="w-4 h-4" />
-                  </div>
-                </button>
+                <div className="grid grid-cols-5 gap-1">
+                  {[
+                    { label: 'Kapalı', val: 0 },
+                    { label: '15 dk', val: 15 },
+                    { label: '30 dk', val: 30 },
+                    { label: '1 saat', val: 60 },
+                    { label: '2 saat', val: 120 },
+                  ].map((opt) => {
+                    const currentLead = settings.reminderMinutesBefore ?? 30;
+                    const isSelected = currentLead === opt.val;
+                    return (
+                      <button
+                        key={opt.val}
+                        type="button"
+                        onClick={async () => {
+                          if (opt.val > 0 && notifPermission === 'default') {
+                            const res = await requestSystemNotificationPermission();
+                            setNotifPermission(res);
+                          }
+                          onUpdateSettings({
+                            ...settings,
+                            reminderMinutesBefore: opt.val,
+                          });
+                          showTemporaryFeedback(
+                            opt.val === 0
+                              ? 'Hatırlatıcı kapatıldı'
+                              : opt.val >= 60
+                              ? `${opt.val / 60} saat önce`
+                              : `${opt.val} dk önce`
+                          );
+                        }}
+                        className={`py-1.5 px-1 rounded-xl text-[11px] font-bold transition cursor-pointer ${
+                          isSelected
+                            ? opt.val === 0
+                              ? 'bg-rose-600 text-white shadow-2xs'
+                              : primaryBtnClass
+                            : secondaryBtnClass
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </section>
 
-            {/* D. GÖRÜNÜM VE BİLDİRİM TERCİHLERİ */}
+            {/* =================================================================
+                4. VERİ, SENKRONİZASYON VE HESAP İŞLEMLERİ
+               ================================================================= */}
             <section>
-              <div className="flex items-center justify-between mb-1.5 px-0.5">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  3. Görünüm, Tema ve Bildirim Ayarları
-                </span>
-                <span className="text-[10px] font-semibold text-sky-500">
-                  {currentThemePreset.emoji} {currentThemePreset.name}
+              <div className="flex items-center justify-between mb-1.5 px-1">
+                <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">
+                  Veri ve Hesap
                 </span>
               </div>
 
               <div className={`rounded-2xl border px-3.5 ${cardBoxClass} ${listDivideClass}`}>
-                {/* Varsayılan Ana Sayfa (Açılış Sayfası Tercihi) */}
-                <div className="py-3 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs font-bold">Varsayılan Ana Sayfa (Açılış Ekranı)</div>
-                    <div className="text-[10px] text-slate-400">
-                      Uygulama açıldığında ilk olarak hangi sayfa gelsin?
-                    </div>
-                  </div>
-                  <div
-                    className={`flex items-center p-0.5 rounded-xl border shrink-0 ${
-                      isLight
-                        ? 'bg-slate-100 border-slate-200/80'
-                        : 'bg-slate-900 border-slate-800'
-                    }`}
+                {onResyncFromServer && (
+                  <button
+                    type="button"
+                    disabled={isResyncingServer}
+                    onClick={async () => {
+                      setIsResyncingServer(true);
+                      try {
+                        await onResyncFromServer();
+                      } finally {
+                        setIsResyncingServer(false);
+                      }
+                    }}
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group disabled:opacity-60"
                   >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onUpdateSettings({ ...settings, defaultStartTab: 'home' });
-                        showTemporaryFeedback('Nöbet ekranı ana sayfa yapıldı');
-                      }}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition cursor-pointer ${
-                        (settings.defaultStartTab || 'home') === 'home'
-                          ? isLight
-                            ? 'bg-slate-900 text-white shadow-2xs'
-                            : 'bg-emerald-500 text-slate-950 shadow-2xs'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      <span>🚨</span>
-                      <span>Nöbet</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onUpdateSettings({ ...settings, defaultStartTab: 'calendar' });
-                        showTemporaryFeedback('Takvim ana sayfa yapıldı');
-                      }}
-                      className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition cursor-pointer ${
-                        settings.defaultStartTab === 'calendar'
-                          ? isLight
-                            ? 'bg-slate-900 text-white shadow-2xs'
-                            : 'bg-emerald-500 text-slate-950 shadow-2xs'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      <span>📅</span>
-                      <span>Takvim</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Görünüm (8 Farklı Tema Seçici) */}
-                <div className="py-3.5 flex flex-col gap-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <div
-                        className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
-                          isLight
-                            ? 'bg-rose-500/15 text-rose-600'
-                            : 'bg-rose-500/20 text-rose-400'
-                        }`}
-                      >
-                        <Palette className="w-4 h-4" />
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={iconBoxClass('emerald')}>
+                        <RefreshCw
+                          className={`w-4 h-4 ${isResyncingServer ? 'animate-spin' : ''}`}
+                        />
                       </div>
-                      <div>
-                        <div className="text-xs font-bold">Uygulama Teması (8 Farklı Tema)</div>
-                        <div className="text-[10px] text-slate-400">
-                          3D Dünya atmosferi, gökyüzü ve kart renkleri seçilen temaya göre değişir
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold">
+                          {isResyncingServer ? 'Veriler Yenileniyor...' : 'Verileri Senkronize Et'}
+                        </div>
+                        <div className="text-[10.5px] text-slate-400 truncate">
+                          Güncel kurum ve nöbet listesini yenile
                         </div>
                       </div>
                     </div>
-                  </div>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-emerald-500 transition shrink-0" />
+                  </button>
+                )}
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {THEME_PRESETS.map((tp) => {
-                      const isSelected = (settings.theme || 'dark') === tp.id;
-                      return (
-                        <button
-                          key={tp.id}
-                          type="button"
-                          onClick={() => {
-                            onUpdateSettings({ ...settings, theme: tp.id });
-                            showTemporaryFeedback(`${tp.name} teması uygulandı`);
-                          }}
-                          className={`p-2.5 rounded-xl border text-left flex flex-col gap-1.5 transition cursor-pointer relative overflow-hidden ${
-                            isSelected
-                              ? isLight
-                                ? 'bg-slate-900 text-white border-slate-900 shadow-sm ring-2 ring-sky-500/40'
-                                : 'bg-white/12 text-white border-sky-400 shadow-sm ring-1 ring-sky-400/50'
-                              : isLight
-                              ? 'bg-slate-50 hover:bg-slate-100 border-slate-200/90 text-slate-800'
-                              : 'bg-slate-900/70 hover:bg-slate-800/80 border-slate-800 text-slate-200'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-1">
-                            <span className="text-xs font-extrabold truncate flex items-center gap-1">
-                              <span>{tp.emoji}</span>
-                              <span className="truncate">{tp.name}</span>
-                            </span>
-                            {isSelected && (
-                              <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
-                            )}
-                          </div>
-
-                          <div className="text-[9.5px] opacity-85 line-clamp-1 leading-tight font-medium">
-                            {tp.worldArtifactLabel}
-                          </div>
-
-                          {/* Color Swatch Bar */}
-                          <div className="flex items-center gap-1 mt-0.5">
-                            {tp.previewSwatches.map((hex, sIdx) => (
-                              <span
-                                key={sIdx}
-                                className="h-2.5 flex-1 rounded-full border border-white/20"
-                                style={{ backgroundColor: hex }}
-                              />
-                            ))}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Nöbet Hatırlatıcı Süresi */}
-                <div className="py-3 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-xs font-bold">Nöbet Hatırlatıcı Zamanı</div>
-                    <div className="text-[10px] text-slate-400">
-                      Vardiya başlamadan ne kadar önce uyarılsın?
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    {[
-                      { label: 'Kapalı', val: 0 },
-                      { label: '15dk', val: 15 },
-                      { label: '30dk', val: 30 },
-                      { label: '60dk', val: 60 },
-                    ].map((opt) => {
-                      const currentLead = settings.reminderMinutesBefore ?? 30;
-                      const isSelected = currentLead === opt.val;
-                      return (
-                        <button
-                          key={opt.val}
-                          type="button"
-                          onClick={() => {
-                            onUpdateSettings({
-                              ...settings,
-                              reminderMinutesBefore: opt.val,
-                            });
-                            showTemporaryFeedback(
-                              opt.val === 0 ? 'Kapatıldı' : `${opt.val} dk önce`
-                            );
-                          }}
-                          className={`px-2 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
-                            isSelected
-                              ? primaryBtnClass
-                              : isLight
-                              ? 'text-slate-500 hover:bg-slate-100'
-                              : 'text-slate-400 hover:bg-slate-800'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Nöbet Başlangıç Bildirim Sesi */}
-                <div className="py-3 flex flex-col gap-2.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-xs font-bold flex items-center gap-1.5">
-                        <Bell className="w-3.5 h-3.5 text-sky-500" />
-                        <span>Nöbet Başlangıç Bildirim Sesi</span>
-                      </div>
-                      <div className="text-[10px] text-slate-400">
-                        Seçtiğiniz sese dokunarak önizleme yapabilirsiniz
-                      </div>
-                    </div>
-                    {onTriggerTestToast && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onTriggerTestToast();
-                          showTemporaryFeedback('Test bildirimi gönderildi');
-                        }}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer shrink-0 ${secondaryBtnClass}`}
-                      >
-                        Bildirimi Test Et
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {(
-                      [
-                        { id: 'silent', label: 'Sessiz', icon: '🔇' },
-                        { id: 'chime', label: 'Klasik', icon: '🔔' },
-                        { id: 'telsiz', label: 'Telsiz', icon: '📻' },
-                        { id: 'radar', label: 'Uyarı', icon: '🚨' },
-                        { id: 'soft', label: 'Melodi', icon: '🎵' },
-                      ] as { id: NotificationSoundId; label: string; icon: string }[]
-                    ).map((opt) => {
-                      const currentSound = settings.notificationSound || 'chime';
-                      const isSelected = currentSound === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => {
-                            onUpdateSettings({
-                              ...settings,
-                              notificationSound: opt.id,
-                            });
-                            if (opt.id !== 'silent') {
-                              playNotificationChime(opt.id);
-                              showTemporaryFeedback(`${opt.label} sesi seçildi`);
-                            } else {
-                              showTemporaryFeedback('Sessiz mod aktif');
-                            }
-                          }}
-                          className={`py-2 px-1 rounded-xl flex flex-col items-center justify-center gap-1 text-[11px] font-semibold transition cursor-pointer ${
-                            isSelected
-                              ? opt.id === 'silent'
-                                ? 'bg-rose-600 text-white shadow-xs'
-                                : primaryBtnClass
-                              : secondaryBtnClass
-                          }`}
-                        >
-                          <span className="text-sm leading-none">{opt.icon}</span>
-                          <span className="leading-none truncate max-w-full">
-                            {opt.label}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {/* E. VERİ YEDEKLEME VE SİSTEM ARAÇLARI */}
-            <section>
-              <div className="flex items-center justify-between mb-1.5 px-0.5">
-                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                  4. Veri Yedekleme ve Sistem
-                </span>
-              </div>
-
-              <div className={`rounded-2xl border px-3.5 ${cardBoxClass} ${listDivideClass}`}>
                 <button
                   type="button"
                   onClick={() => setActivePage('backup')}
                   className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Database className="w-4 h-4 text-sky-500 shrink-0" />
-                    <div>
-                      <div className="text-xs font-bold">Yedekleme ve Paylaşım</div>
-                      <div className="text-[10px] text-slate-400">
-                        Ayarlarınızı cihazınıza indirin veya başka cihaza aktarın
-                      </div>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={iconBoxClass('sky')}>
+                      <Database className="w-4 h-4" />
                     </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-sky-500 transition shrink-0" />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTestResults(runBuiltInTests());
-                    setActivePage('diagnostics');
-                  }}
-                  className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Activity className="w-4 h-4 text-emerald-500 shrink-0" />
-                    <div>
-                      <div className="text-xs font-bold">Sistem Doğrulama Testleri</div>
-                      <div className="text-[10px] text-slate-400">
-                        Nöbet hesaplama motoru ve algoritma kontrolü
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold">Yedekleme ve Geri Yükleme</div>
+                      <div className="text-[10.5px] text-slate-400 truncate">
+                        Verilerinizi yedek dosyası olarak indirin veya yükleyin
                       </div>
                     </div>
                   </div>
@@ -1514,29 +1764,43 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   onClick={() => setActivePage('about')}
                   className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
                 >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Info className="w-4 h-4 text-indigo-400 shrink-0" />
-                    <span className="text-xs font-bold">Uygulama Hakkında</span>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={iconBoxClass('indigo')}>
+                      <Info className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold">Uygulama Hakkında</div>
+                      <div className="text-[10.5px] text-slate-400 truncate">
+                        Sürüm ve geliştirici bilgileri
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5 text-xs text-slate-400 group-hover:text-sky-500 transition">
-                    <span className="text-[11px] font-semibold">v2.5</span>
+                  <div className="flex items-center gap-1.5 text-slate-400 group-hover:text-sky-500 transition shrink-0">
+                    <span className="text-[11px] font-semibold">v3.0</span>
                     <ChevronRight className="w-4 h-4" />
                   </div>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setShowResetConfirm(true)}
-                  className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Trash2 className="w-4 h-4 text-rose-500 shrink-0" />
-                    <span className="text-xs font-bold text-rose-500">
-                      Tüm Verileri Sıfırla
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-rose-400/80">Fabrika ayarları</span>
-                </button>
+                {onOpenFirstLaunchScreen && (
+                  <button
+                    type="button"
+                    onClick={onOpenFirstLaunchScreen}
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left cursor-pointer group"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className={iconBoxClass('amber')}>
+                        <LogOut className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold">Giriş Ekranına Dön / Hesap Değiştir</div>
+                        <div className="text-[10.5px] text-slate-400 truncate">
+                          Personel veya yönetici giriş ekranına geç
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-amber-500 transition shrink-0" />
+                  </button>
+                )}
               </div>
             </section>
           </div>
@@ -1554,6 +1818,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             settings={settings}
             activeRefHistory={refHistory}
             isLight={isLight}
+            activeUnit={activeUnit}
+            activeUnitProfileLocks={activeUnitProfileLocks}
+            currentUser={currentUser}
+            isAuthorizedAdmin={isAuthorizedAdmin}
+            onTriggerToast={onTriggerToast}
             onSelectProfile={(id) => {
               onSelectProfile(id);
               showTemporaryFeedback('Aktif profil değiştirildi ✓');
@@ -1572,841 +1841,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       )}
 
       {/* =====================================================================
-          SUB-PAGE 1 & 2 (BİRLEŞTİRİLMİŞ): NÖBET REFERANSI VE VARDİYA SAATLERİ
-         ===================================================================== */}
-      {(activePage === 'reference' || activePage === 'shift-hours') && (
-        <div className="flex flex-col gap-4 pb-6 animate-fade-in">
-          {/* AKTİF SİSTEM ÖZET KARTI */}
-          <div
-            className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 ${
-              isLight
-                ? 'bg-sky-50/80 border-sky-200/80 text-slate-800'
-                : 'bg-sky-950/25 border-sky-500/20 text-slate-100'
-            }`}
-          >
-            <div className="min-w-0">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-500 block">
-                Aktif Nöbet ve Vardiya Özeti
-              </span>
-              <div className="text-xs font-bold mt-0.5 truncate">
-                {settings.groupNames[refGroupIdx] || `${refGroupIdx + 1}. Grup`} ·{' '}
-                {trDateFormatter(refDateVal)} ({refShiftType === 'GUNDUZ' ? 'Gündüz' : 'Gece'})
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5 truncate">
-                {SHIFT_PRESETS.find((p) => p.id === (settings.shiftPreset || '112_5G'))?.name ||
-                  'Özel Vardiya Düzeni'}{' '}
-                · {settings.numGroups} Grup · {settings.dayStart}-{settings.dayEnd} /{' '}
-                {settings.nightStart}-{settings.nightEnd}
-              </div>
-            </div>
-            <span
-              className={`px-2.5 py-1 rounded-xl text-[10px] font-bold shrink-0 ${
-                isLight ? 'bg-sky-500/15 text-sky-700' : 'bg-sky-500/20 text-sky-300'
-              }`}
-            >
-              {SHIFT_PRESETS.find((p) => p.id === (settings.shiftPreset || '112_5G'))?.shortBadge ||
-                'Özel'}
-            </span>
-          </div>
-
-          {/* KURULUM YÖNTEMİ SEÇİMİ: MANUEL HIZLI KURULUM vs PDF/FOTOĞRAF OTOMATİK KURULUM */}
-          <div
-            className={`p-1 rounded-2xl border grid grid-cols-2 gap-1 ${
-              isLight
-                ? 'bg-slate-100 border-slate-200/80'
-                : 'bg-slate-900/70 border-slate-800'
-            }`}
-          >
-            <button
-              type="button"
-              onClick={() => setRefSetupMode('manual')}
-              className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                refSetupMode === 'manual'
-                  ? isLight
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'bg-slate-800 text-white shadow-xs'
-                  : 'text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-              <span className="truncate">Manuel Hızlı Kurulum</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setRefSetupMode('ai')}
-              className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
-                refSetupMode === 'ai'
-                  ? isLight
-                    ? 'bg-white text-emerald-700 shadow-xs'
-                    : 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 shadow-xs'
-                  : 'text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              <FileText className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              <span className="truncate">PDF / Fotoğraftan Kur</span>
-            </button>
-          </div>
-
-          {/* YÖNTEM B: AKILLI PDF / FOTOĞRAF VARDİYA LİSTESİ ENTEGRASYON SİSTEMİ */}
-          {refSetupMode === 'ai' && (
-            <div className="flex flex-col gap-3 animate-fade-in">
-              <ShiftScheduleImporter
-                settings={settings}
-                refHistory={refHistory}
-                notes={notes}
-                activeProfileName={activeProfile?.name}
-                isLight={isLight}
-                onUpdateSettings={onUpdateSettings}
-                onSaveNotes={onSaveNotes}
-                onSyncLocalRefState={(groupIdx, refDate, refType) => {
-                  setRefGroupIdx(groupIdx);
-                  setRefDateVal(refDate);
-                  setRefShiftType(refType);
-                }}
-                onFeedback={showTemporaryFeedback}
-              />
-              <button
-                type="button"
-                onClick={() => setRefSetupMode('manual')}
-                className={`w-full py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${secondaryBtnClass}`}
-              >
-                ← Manuel Nöbet Referansı ve Saat Ayarlarına Dön
-              </button>
-            </div>
-          )}
-
-          {/* YÖNTEM A: MANUEL HIZLI KURULUM (3 NET ADIM) */}
-          {refSetupMode === 'manual' && (
-            <div className="flex flex-col gap-4 animate-fade-in">
-              {/* 1. ADIM (EN ÖNEMLİ): KİŞİSEL NÖBET REFERANSINIZ */}
-              <section
-                className={`p-3.5 rounded-2xl border flex flex-col gap-3.5 ${
-                  isLight
-                    ? 'bg-white border-slate-200/80 shadow-xs'
-                    : 'bg-slate-900/40 border-slate-800/80'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-amber-500 text-white text-xs font-black flex items-center justify-center shrink-0">
-                      1
-                    </span>
-                    <div>
-                      <h3 className="text-xs font-bold tracking-tight">
-                        Kişisel Nöbet Referansınız (Başlangıç Noktası)
-                      </h3>
-                      <p className="text-[10px] text-slate-400">
-                        Kendi grubunuzu ve bildiğiniz herhangi bir nöbet gününüzü seçip kaydedin
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Grubunuz */}
-                <div>
-                  <span className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-                    1. Nöbet Grubunuzu Seçin
-                  </span>
-                  <div className="grid grid-cols-5 gap-1.5">
-                    {Array.from({ length: settings.numGroups }, (_, i) => {
-                      const isSelected = refGroupIdx === i;
-                      return (
-                        <button
-                          key={i}
-                          type="button"
-                          onClick={() => setRefGroupIdx(i)}
-                          className={`py-2 px-1 rounded-xl text-xs font-semibold transition cursor-pointer truncate ${
-                            isSelected ? primaryBtnClass : secondaryBtnClass
-                          }`}
-                        >
-                          {settings.groupNames[i] || `${i + 1}. Grup`}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Tarih ve Vardiya Yan Yana / Düzenli */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-                      2. Bilinen Nöbet Tarihi
-                    </label>
-                    <input
-                      type="date"
-                      value={refDateVal}
-                      onChange={(e) => setRefDateVal(e.target.value)}
-                      className={`w-full p-2.5 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-                      3. O Günkü Vardiya Türü
-                    </label>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => setRefShiftType('GUNDUZ')}
-                        className={`py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                          refShiftType === 'GUNDUZ'
-                            ? 'bg-amber-500 text-white shadow-xs'
-                            : secondaryBtnClass
-                        }`}
-                      >
-                        ☀️ Gündüz
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRefShiftType('AKSAM')}
-                        className={`py-2.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                          refShiftType === 'AKSAM'
-                            ? 'bg-indigo-600 text-white shadow-xs'
-                            : secondaryBtnClass
-                        }`}
-                      >
-                        🌙 Gece
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleSavePrimaryRef}
-                  className={`w-full py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${primaryBtnClass}`}
-                >
-                  Referansı Kaydet ve Uygula ✓
-                </button>
-              </section>
-
-              {/* 2. ADIM: VARDİYA SİSTEMİ VE HAZIR ŞABLONLAR */}
-              <section
-                className={`p-3.5 rounded-2xl border flex flex-col gap-3 ${
-                  isLight
-                    ? 'bg-white border-slate-200/80 shadow-xs'
-                    : 'bg-slate-900/40 border-slate-800/80'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-sky-500 text-white text-xs font-black flex items-center justify-center shrink-0">
-                      2
-                    </span>
-                    <div>
-                      <h3 className="text-xs font-bold tracking-tight">
-                        Çalışma Sistemi ve Hazır Şablonlar
-                      </h3>
-                      <p className="text-[10px] text-slate-400">
-                        Kurumunuzun vardiya şablonunu veya toplam grup sayısını seçin
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Toplam Grup Sayısı Kontrolü */}
-                  <div className="flex items-center gap-1 text-xs shrink-0">
-                    <button
-                      type="button"
-                      disabled={settings.numGroups <= 2}
-                      onClick={() => handleUpdateGroupCount(settings.numGroups - 1)}
-                      className={`w-6 h-6 rounded-lg flex items-center justify-center disabled:opacity-30 cursor-pointer ${secondaryBtnClass}`}
-                    >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <span className="text-[11px] font-bold px-1.5">
-                      {settings.numGroups} Grup
-                    </span>
-                    <button
-                      type="button"
-                      disabled={settings.numGroups >= 10}
-                      onClick={() => handleUpdateGroupCount(settings.numGroups + 1)}
-                      className={`w-6 h-6 rounded-lg flex items-center justify-center disabled:opacity-30 cursor-pointer ${secondaryBtnClass}`}
-                    >
-                      <Plus className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className={listDivideClass}>
-                  {SHIFT_PRESETS.map((preset) => {
-                    const isSelected = (settings.shiftPreset || '112_5G') === preset.id;
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        onClick={() => handleApplyPreset(preset)}
-                        className="w-full py-2.5 flex items-center justify-between gap-3 text-left cursor-pointer group"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`text-xs font-bold ${
-                                isSelected ? 'text-sky-500' : ''
-                              }`}
-                            >
-                              {preset.name}
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                            {preset.desc}
-                          </div>
-                        </div>
-                        <span
-                          className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold shrink-0 transition ${
-                            isSelected ? primaryBtnClass : secondaryBtnClass
-                          }`}
-                        >
-                          {isSelected ? 'Seçili ✓' : 'Uygula'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* 3. ADIM: VARDİYA SAATLERİ VE DİNLENME SÜRELERİ (AÇILIR/KAPANIR SİSTEMATİK BÖLÜM) */}
-              <section
-                className={`p-3.5 rounded-2xl border flex flex-col gap-3.5 ${
-                  isLight
-                    ? 'bg-white border-slate-200/80 shadow-xs'
-                    : 'bg-slate-900/40 border-slate-800/80'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => setShowAdvancedHours((prev) => !prev)}
-                  className="w-full flex items-center justify-between gap-2 text-left cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="w-6 h-6 rounded-full bg-indigo-500 text-white text-xs font-black flex items-center justify-center shrink-0">
-                      3
-                    </span>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <h3 className="text-xs font-bold tracking-tight truncate">
-                          Vardiya Saatleri ve İzin Süresini Özelleştir
-                        </h3>
-                      </div>
-                      <p className="text-[10px] text-slate-400 truncate">
-                        Gündüz {settings.dayStart}-{settings.dayEnd} · Gece {settings.nightStart}-
-                        {settings.nightEnd} · {settings.restHours} Saat İzin
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 text-[11px] font-semibold text-sky-500 shrink-0">
-                    <span>{showAdvancedHours ? 'Gizle' : 'Saatleri Düzenle'}</span>
-                    <ChevronDown
-                      className={`w-4 h-4 transition-transform ${
-                        showAdvancedHours ? 'rotate-180' : ''
-                      }`}
-                    />
-                  </div>
-                </button>
-
-                {showAdvancedHours && (
-                  <div className="pt-2 border-t border-slate-500/10 flex flex-col gap-3.5 animate-fade-in">
-                    {/* Vardiya Geçiş Düzeni */}
-                    <div>
-                      <span className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-                        Vardiya Geçiş Düzeni
-                      </span>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdateSettings({
-                              ...settings,
-                              shiftPreset: 'CUSTOM',
-                              shiftTransition: 'ALTERNATE',
-                            })
-                          }
-                          className={`py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                            settings.shiftTransition === 'ALTERNATE'
-                              ? primaryBtnClass
-                              : secondaryBtnClass
-                          }`}
-                        >
-                          Dönüşümlü (Gündüz ↔ Gece)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onUpdateSettings({
-                              ...settings,
-                              shiftPreset: 'CUSTOM',
-                              shiftTransition: 'SAME',
-                            })
-                          }
-                          className={`py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                            settings.shiftTransition === 'SAME'
-                              ? primaryBtnClass
-                              : secondaryBtnClass
-                          }`}
-                        >
-                          Sabit (Hep Aynı Vardiya)
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Gündüz ve Gece Vardiyası Kutuları */}
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <div
-                        className={`p-2.5 rounded-xl border flex flex-col gap-2 ${
-                          isLight
-                            ? 'bg-amber-50/50 border-amber-200/60'
-                            : 'bg-amber-950/15 border-amber-500/20'
-                        }`}
-                      >
-                        <span className="text-xs font-bold text-amber-500 flex items-center gap-1">
-                          ☀️ Gündüz Vardiyası
-                        </span>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Başlangıç
-                          </label>
-                          <input
-                            type="time"
-                            value={settings.dayStart}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                ...settings,
-                                shiftPreset: 'CUSTOM',
-                                dayStart: e.target.value,
-                              })
-                            }
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Bitiş
-                          </label>
-                          <input
-                            type="time"
-                            value={settings.dayEnd}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                ...settings,
-                                shiftPreset: 'CUSTOM',
-                                dayEnd: e.target.value,
-                              })
-                            }
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Gündüz Sonrası İzin (Saat)
-                          </label>
-                          <input
-                            type="number"
-                            min={12}
-                            max={120}
-                            value={settings.dayRestHours ?? settings.restHours}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value, 10);
-                              if (val >= 12 && val <= 120) {
-                                onUpdateSettings({
-                                  ...settings,
-                                  shiftPreset: 'CUSTOM',
-                                  dayRestHours: val,
-                                });
-                              }
-                            }}
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                      </div>
-
-                      <div
-                        className={`p-2.5 rounded-xl border flex flex-col gap-2 ${
-                          isLight
-                            ? 'bg-indigo-50/50 border-indigo-200/60'
-                            : 'bg-indigo-950/15 border-indigo-500/20'
-                        }`}
-                      >
-                        <span className="text-xs font-bold text-indigo-400 flex items-center gap-1">
-                          🌙 Gece Vardiyası
-                        </span>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Başlangıç
-                          </label>
-                          <input
-                            type="time"
-                            value={settings.nightStart}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                ...settings,
-                                shiftPreset: 'CUSTOM',
-                                nightStart: e.target.value,
-                              })
-                            }
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Bitiş
-                          </label>
-                          <input
-                            type="time"
-                            value={settings.nightEnd}
-                            onChange={(e) =>
-                              onUpdateSettings({
-                                ...settings,
-                                shiftPreset: 'CUSTOM',
-                                nightEnd: e.target.value,
-                              })
-                            }
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-slate-400 block mb-1">
-                            Gece Sonrası İzin (Saat)
-                          </label>
-                          <input
-                            type="number"
-                            min={12}
-                            max={120}
-                            value={settings.nightRestHours ?? settings.restHours}
-                            onChange={(e) => {
-                              const val = parseInt(e.target.value, 10);
-                              if (val >= 12 && val <= 120) {
-                                onUpdateSettings({
-                                  ...settings,
-                                  shiftPreset: 'CUSTOM',
-                                  nightRestHours: val,
-                                  restHours: val,
-                                });
-                              }
-                            }}
-                            className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Hızlı Standart Dinlenme Süresi Seçimi */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-[11px] font-semibold text-slate-400">
-                          Hızlı Dinlenme Süresi Seçimi
-                        </span>
-                        <span className="text-xs font-bold">
-                          {!settings.is24HourSystem &&
-                          (settings.dayRestHours ?? settings.restHours) !==
-                            (settings.nightRestHours ?? settings.restHours)
-                            ? `${settings.dayRestHours}s Gündüz / ${settings.nightRestHours}s Gece`
-                            : `${settings.restHours} Saat`}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-4 gap-1.5 mb-2">
-                        {REST_PRESETS.map((preset) => (
-                          <button
-                            key={preset}
-                            type="button"
-                            onClick={() => {
-                              setRestHoursInput(String(preset));
-                              onUpdateSettings({
-                                ...settings,
-                                shiftPreset: 'CUSTOM',
-                                restHours: preset,
-                                dayRestHours: preset,
-                                nightRestHours: preset,
-                              });
-                            }}
-                            className={`py-2 rounded-xl text-xs font-semibold transition cursor-pointer ${
-                              settings.restHours === preset &&
-                              (settings.dayRestHours ?? preset) === preset &&
-                              (settings.nightRestHours ?? preset) === preset
-                                ? primaryBtnClass
-                                : secondaryBtnClass
-                            }`}
-                          >
-                            {preset}s
-                          </button>
-                        ))}
-                      </div>
-
-                      <input
-                        type="number"
-                        min={12}
-                        max={120}
-                        value={restHoursInput}
-                        onChange={(e) => {
-                          setRestHoursInput(e.target.value);
-                          const h = parseInt(e.target.value, 10);
-                          if (h >= 12 && h <= 120) {
-                            onUpdateSettings({
-                              ...settings,
-                              shiftPreset: 'CUSTOM',
-                              restHours: h,
-                              dayRestHours: h,
-                              nightRestHours: h,
-                            });
-                          }
-                        }}
-                        placeholder="Özel dinlenme saati (12-120)"
-                        className={`w-full p-2 rounded-xl text-xs font-semibold border outline-none ${inputClass}`}
-                      />
-                    </div>
-                  </div>
-                )}
-              </section>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* =====================================================================
-          SUB-PAGE 3: GRUPLAR VE PERSONEL
-         ===================================================================== */}
-      {activePage === 'groups' && (
-        <div className="flex flex-col gap-4 pb-4 animate-fade-in">
-          <div className="flex items-center justify-between py-1">
-            <span className="text-xs font-semibold text-slate-400">Toplam Grup Sayısı</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                disabled={settings.numGroups <= 2}
-                onClick={() => handleUpdateGroupCount(settings.numGroups - 1)}
-                className={`w-7 h-7 rounded-lg flex items-center justify-center disabled:opacity-30 cursor-pointer ${secondaryBtnClass}`}
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <span className="text-xs font-bold w-5 text-center">{settings.numGroups}</span>
-              <button
-                type="button"
-                disabled={settings.numGroups >= 10}
-                onClick={() => handleUpdateGroupCount(settings.numGroups + 1)}
-                className={`w-7 h-7 rounded-lg flex items-center justify-center disabled:opacity-30 cursor-pointer ${secondaryBtnClass}`}
-              >
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-
-          <div className={listDivideClass}>
-            {Array.from({ length: settings.numGroups }, (_, i) => {
-              const isExpanded = expandedGroupIdx === i;
-              const isMyGroup = refHistory.length > 0 && i === activeGroupIdx;
-              const groupTitle = settings.groupNames[i] || `${i + 1}. Grup`;
-              const membersText = formatMemberListTitleCaseTR(settings.groupMembers[i] || '');
-
-              return (
-                <div key={i} className="py-2.5 flex flex-col">
-                  <button
-                    type="button"
-                    onClick={() => setExpandedGroupIdx(isExpanded ? null : i)}
-                    className="w-full flex items-center justify-between gap-3 text-left cursor-pointer"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold">{groupTitle}</span>
-                        {isMyGroup && (
-                          <span className="text-[10px] font-semibold text-sky-500">· Grubum</span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                        {membersText || 'Personel eklenmedi'}
-                      </div>
-                    </div>
-                    <span className="text-xs font-medium text-slate-400 shrink-0">
-                      {isExpanded ? 'Kapat' : 'Düzenle'}
-                    </span>
-                  </button>
-
-                  {isExpanded && (
-                    <div className="mt-3 pt-3 border-t border-slate-500/10 flex flex-col gap-3">
-                      <div>
-                        <label className="text-[11px] text-slate-400 mb-1 block">Grup Adı</label>
-                        <input
-                          type="text"
-                          value={settings.groupNames[i] || ''}
-                          placeholder={`${i + 1}. Grup`}
-                          onChange={(e) => {
-                            const updated = [...settings.groupNames];
-                            updated[i] = e.target.value;
-                            onUpdateSettings({ ...settings, groupNames: updated });
-                          }}
-                          className={`w-full p-2 rounded-lg text-xs font-semibold border outline-none ${inputClass}`}
-                        />
-                      </div>
-
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <label className="text-[11px] text-slate-400">
-                            Personeller (Otomatik virgülle ayrılır)
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => handleToggleVoiceInput(i)}
-                            className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer ${
-                              listeningGroupIdx === i
-                                ? 'bg-rose-600 text-white'
-                                : primaryBtnClass
-                            }`}
-                          >
-                            {listeningGroupIdx === i ? (
-                              <>
-                                <MicOff className="w-3 h-3" />
-                                <span>Durdur</span>
-                              </>
-                            ) : (
-                              <>
-                                <Mic className="w-3 h-3" />
-                                <span>Sesle Ekle</span>
-                              </>
-                            )}
-                          </button>
-                        </div>
-
-                        {listeningGroupIdx === i && (
-                          <div className="p-2.5 rounded-lg bg-rose-500/10 text-rose-400 text-xs flex items-center justify-between">
-                            <span>
-                              {interimSpeech
-                                ? `Algılanan: "${interimSpeech}"`
-                                : 'İsimleri söyleyin (Örn: Ahmet Yılmaz)...'}
-                            </span>
-                          </div>
-                        )}
-
-                        {voiceErrorMsg && (
-                          <div className="text-[11px] text-amber-500 flex items-center justify-between gap-2">
-                            <span>{voiceErrorMsg}</span>
-                            <button
-                              type="button"
-                              onClick={() => setVoiceErrorMsg(null)}
-                              className="cursor-pointer"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        )}
-
-                        {/* Quick Dictation / Auto-Comma Input */}
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            ref={quickInputRef}
-                            type="text"
-                            value={quickDictationText}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              if (val.includes(',') || val.includes(';')) {
-                                handleCommitQuickDictation(i, val);
-                                return;
-                              }
-                              setQuickDictationText(val);
-                              if (dictationTimerRef.current !== null) {
-                                window.clearTimeout(dictationTimerRef.current);
-                              }
-                              if (val.trim().length >= 2) {
-                                dictationTimerRef.current = window.setTimeout(() => {
-                                  handleCommitQuickDictation(i, val);
-                                }, 1400);
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                handleCommitQuickDictation(i);
-                              }
-                            }}
-                            onBlur={() => {
-                              if (quickDictationText.trim()) {
-                                handleCommitQuickDictation(i);
-                              }
-                            }}
-                            placeholder="İsim söyleyin veya yazıp Enter'a basın..."
-                            className={`flex-1 p-2 rounded-lg text-xs border outline-none ${inputClass}`}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleCommitQuickDictation(i)}
-                            disabled={!quickDictationText.trim()}
-                            className={`px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-30 cursor-pointer ${secondaryBtnClass}`}
-                          >
-                            Ekle
-                          </button>
-                        </div>
-
-                        {/* Person Chips */}
-                        {(() => {
-                          const parsedPeople = (settings.groupMembers[i] || '')
-                            .split(',')
-                            .map((p) => formatTitleCaseTR(p))
-                            .filter(Boolean);
-
-                          if (parsedPeople.length === 0) return null;
-
-                          return (
-                            <div className="flex flex-wrap gap-1.5 pt-0.5">
-                              {parsedPeople.map((person, pIdx) => (
-                                <span
-                                  key={`${person}-${pIdx}`}
-                                  className={`inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-lg text-xs font-medium ${secondaryBtnClass}`}
-                                >
-                                  <span>{person}</span>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const nextPeople = parsedPeople.filter(
-                                        (_, idx) => idx !== pIdx
-                                      );
-                                      const updated = [...settings.groupMembers];
-                                      updated[i] = nextPeople.join(', ');
-                                      onUpdateSettings({ ...settings, groupMembers: updated });
-                                    }}
-                                    className="p-0.5 text-slate-400 hover:text-rose-500 cursor-pointer"
-                                  >
-                                    <X className="w-3 h-3" />
-                                  </button>
-                                </span>
-                              ))}
-                            </div>
-                          );
-                        })()}
-
-                        <textarea
-                          rows={2}
-                          value={settings.groupMembers[i] || ''}
-                          placeholder="Toplu liste (virgülle ayrılmış)"
-                          onChange={(e) => {
-                            const updated = [...settings.groupMembers];
-                            updated[i] = e.target.value;
-                            onUpdateSettings({ ...settings, groupMembers: updated });
-                          }}
-                          onBlur={(e) => {
-                            const updated = [...settings.groupMembers];
-                            updated[i] = formatMemberListTitleCaseTR(e.target.value);
-                            onUpdateSettings({ ...settings, groupMembers: updated });
-                          }}
-                          className={`w-full p-2 rounded-lg text-xs border outline-none ${inputClass}`}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* =====================================================================
           SUB-PAGE 4: BECAYİŞ VE NOTLAR
          ===================================================================== */}
-      {activePage === 'notes' && (
+      {activePage === 'notes' && (() => {
+        const groupedNotes = groupConsecutiveRecords(notes);
+        return (
         <div className="flex flex-col gap-4 pb-4 animate-fade-in">
           <div className="flex items-center gap-1">
             {[
-              { id: 'list' as const, label: `Kayıtlar (${notes.length})` },
+              { id: 'list' as const, label: `Kayıtlar (${groupedNotes.length})` },
               { id: 'add' as const, label: 'Yeni Ekle' },
-              { id: 'chain' as const, label: `Referanslar (${refHistory.length})` },
+              ...(isAdminMode
+                ? [{ id: 'chain' as const, label: `Referanslar (${refHistory.length})` }]
+                : []),
             ].map((t) => (
               <button
                 key={t.id}
@@ -2423,44 +1870,55 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
           {notesTab === 'list' && (
             <div className={listDivideClass}>
-              {notes.length === 0 ? (
+              {groupedNotes.length === 0 ? (
                 <div className="py-8 text-center text-xs text-slate-400">
                   Henüz kayıtlı becayiş veya not bulunmuyor.
                 </div>
               ) : (
-                notes
-                  .slice()
-                  .reverse()
-                  .map((n) => (
-                    <div key={n.id} className="py-3 flex items-center justify-between gap-3">
+                groupedNotes.map((grp) => {
+                  const hasCloudNote = grp.items.some((it) => Boolean(it.cloudNoteId));
+                  return (
+                    <div key={grp.key} className="py-3 flex items-center justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs font-bold">
-                            {trDateFormatter(n.date)} ·{' '}
-                            <span className="text-sky-500">{n.type}</span>
+                          <span className="text-xs font-bold font-mono tabular-nums">
+                            {grp.startDate === grp.endDate
+                              ? trDateFormatter(grp.startDate)
+                              : `${trDateFormatter(grp.startDate)} – ${trDateFormatter(grp.endDate)}`}
                           </span>
-                          {n.swapWithPerson && (
+                          <span aria-hidden="true">·</span>
+                          <span className="text-xs font-bold text-emerald-500">
+                            {grp.dayCount} Gün
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-xs font-bold text-sky-500">{grp.type}</span>
+                          {grp.swapWithPerson && (
                             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400">
-                              🔄 {n.swapMyPerson ? `${n.swapMyPerson} ⇄ ` : ''}
-                              {n.swapWithPerson}
+                              🔄 {grp.personName ? `${grp.personName} ⇄ ` : ''}
+                              {grp.swapWithPerson}
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-slate-400 mt-0.5 truncate">{n.desc}</div>
+                        <div className="text-xs text-slate-400 mt-0.5 truncate">{grp.desc}</div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const updated = notes.filter((it) => it.id !== n.id);
-                          onSaveNotes(updated, refHistory);
-                          showTemporaryFeedback('Silindi');
-                        }}
-                        className="p-1.5 text-slate-400 hover:text-rose-500 transition cursor-pointer"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {!hasCloudNote && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const removeIds = new Set(grp.items.map((it) => it.id));
+                            const updated = notes.filter((it) => !removeIds.has(it.id));
+                            onSaveNotes(updated, refHistory);
+                            showTemporaryFeedback('Silindi');
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-rose-500 transition cursor-pointer"
+                          title={grp.dayCount > 1 ? `${grp.dayCount} Günlük Kaydı Sil` : 'Kaydı Sil'}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
-                  ))
+                  );
+                })
               )}
             </div>
           )}
@@ -2665,63 +2123,67 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 />
               </div>
 
-              <div className="py-2 flex items-center justify-between border-t border-slate-500/10">
-                <span className="text-xs font-medium">Yeni Referans Başlangıcı</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={isNewRef}
-                  onClick={() => setIsNewRef(!isNewRef)}
-                  className={`w-10 h-5.5 rounded-full transition-colors p-0.5 cursor-pointer flex items-center ${
-                    isNewRef
-                      ? 'bg-sky-500 justify-end'
-                      : isLight
-                      ? 'bg-slate-300 justify-start'
-                      : 'bg-slate-700 justify-start'
-                  }`}
-                >
-                  <span className="w-4.5 h-4.5 rounded-full bg-white shadow-xs" />
-                </button>
-              </div>
-
-              {isNewRef && (
-                <div className="grid grid-cols-2 gap-2">
-                  <select
-                    value={newRefGroup}
-                    onChange={(e) => setNewRefGroup(parseInt(e.target.value, 10))}
-                    className={`p-2 rounded-lg text-xs font-semibold border outline-none ${inputClass}`}
-                  >
-                    {Array.from({ length: settings.numGroups }, (_, i) => (
-                      <option key={i} value={i}>
-                        {settings.groupNames[i] || `${i + 1}. Grup`}
-                      </option>
-                    ))}
-                  </select>
-                  <div className="grid grid-cols-2 gap-1.5">
+              {isAdminMode && (
+                <>
+                  <div className="py-2 flex items-center justify-between border-t border-slate-500/10">
+                    <span className="text-xs font-medium">Yeni Referans Başlangıcı</span>
                     <button
                       type="button"
-                      onClick={() => setNewRefShiftType('GUNDUZ')}
-                      className={`py-2 rounded-lg text-xs font-semibold cursor-pointer ${
-                        newRefShiftType === 'GUNDUZ'
-                          ? 'bg-amber-500 text-white'
-                          : secondaryBtnClass
+                      role="switch"
+                      aria-checked={isNewRef}
+                      onClick={() => setIsNewRef(!isNewRef)}
+                      className={`w-10 h-5.5 rounded-full transition-colors p-0.5 cursor-pointer flex items-center ${
+                        isNewRef
+                          ? 'bg-sky-500 justify-end'
+                          : isLight
+                          ? 'bg-slate-300 justify-start'
+                          : 'bg-slate-700 justify-start'
                       }`}
                     >
-                      Gündüz
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setNewRefShiftType('AKSAM')}
-                      className={`py-2 rounded-lg text-xs font-semibold cursor-pointer ${
-                        newRefShiftType === 'AKSAM'
-                          ? 'bg-indigo-600 text-white'
-                          : secondaryBtnClass
-                      }`}
-                    >
-                      Gece
+                      <span className="w-4.5 h-4.5 rounded-full bg-white shadow-xs" />
                     </button>
                   </div>
-                </div>
+
+                  {isNewRef && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <select
+                        value={newRefGroup}
+                        onChange={(e) => setNewRefGroup(parseInt(e.target.value, 10))}
+                        className={`p-2 rounded-lg text-xs font-semibold border outline-none ${inputClass}`}
+                      >
+                        {Array.from({ length: settings.numGroups }, (_, i) => (
+                          <option key={i} value={i}>
+                            {settings.groupNames[i] || `${i + 1}. Grup`}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setNewRefShiftType('GUNDUZ')}
+                          className={`py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                            newRefShiftType === 'GUNDUZ'
+                              ? 'bg-amber-500 text-white'
+                              : secondaryBtnClass
+                          }`}
+                        >
+                          Gündüz
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setNewRefShiftType('AKSAM')}
+                          className={`py-2 rounded-lg text-xs font-semibold cursor-pointer ${
+                            newRefShiftType === 'AKSAM'
+                              ? 'bg-indigo-600 text-white'
+                              : secondaryBtnClass
+                          }`}
+                        >
+                          Gece
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
 
               <button
@@ -2734,7 +2196,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           )}
 
-          {notesTab === 'chain' && (
+          {isAdminMode && notesTab === 'chain' && (
             <div className={listDivideClass}>
               {refHistory.map((r, idx) => (
                 <div key={idx} className="py-3 flex items-center justify-between text-xs">
@@ -2766,131 +2228,159 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* =====================================================================
-          SUB-PAGE 5: YEDEKLEME VE PAYLAŞIM
+          SUB-PAGE 5: YEDEKLEME VE GERİ YÜKLEME (SADE STANDART TASARIM)
          ===================================================================== */}
       {activePage === 'backup' && (
-        <div className="flex flex-col gap-5 pb-4 animate-fade-in">
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-semibold text-slate-400">Dışa Aktar</span>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={handleDownloadBackup}
-                className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer ${primaryBtnClass}`}
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Dosya İndir</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleCopyBackup}
-                className={`py-2.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer ${secondaryBtnClass}`}
-              >
-                <Copy className="w-3.5 h-3.5" />
-                <span>Kodu Kopyala</span>
-              </button>
+        <div className="flex flex-col gap-4 pb-4 animate-fade-in">
+          <div
+            className={`p-4 rounded-2xl border flex flex-col gap-3 ${
+              isLight
+                ? 'bg-white border-slate-200/85 shadow-2xs'
+                : 'bg-slate-900/55 border-slate-800/85'
+            }`}
+          >
+            <div>
+              <div className="text-xs font-extrabold">Yedek Dosyası İndir</div>
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                Nöbet ayarlarınızı, profilinizi ve takvim notlarınızı cihazınıza yedek dosyası olarak kaydedin.
+              </div>
             </div>
+            <button
+              type="button"
+              onClick={handleDownloadBackup}
+              className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition ${primaryBtnClass}`}
+            >
+              <Download className="w-4 h-4" />
+              <span>Yedek Dosyasını Cihaza İndir</span>
+            </button>
           </div>
 
-          <div className="flex flex-col gap-2 pt-3 border-t border-slate-500/10">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-400">Geri Yükle</span>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  const reader = new FileReader();
-                  reader.onload = (ev) => {
-                    const content = String(ev.target?.result || '');
-                    if (content) applyBackupPayload(content);
-                  };
-                  reader.readAsText(file);
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="text-xs font-semibold text-sky-500 flex items-center gap-1 cursor-pointer"
-              >
-                <Upload className="w-3.5 h-3.5" />
-                <span>Dosya Seç</span>
-              </button>
+          <div
+            className={`p-4 rounded-2xl border flex flex-col gap-3 ${
+              isLight
+                ? 'bg-white border-slate-200/85 shadow-2xs'
+                : 'bg-slate-900/55 border-slate-800/85'
+            }`}
+          >
+            <div>
+              <div className="text-xs font-extrabold">Yedek Dosyasından Geri Yükle</div>
+              <div className="text-[11px] text-slate-400 mt-0.5">
+                Daha önce indirdiğiniz yedek dosyasını seçerek ayarlarınızı ve kayıtlarınızı geri yükleyin.
+              </div>
             </div>
 
-            <textarea
-              rows={4}
-              value={importJsonText}
-              onChange={(e) => setImportJsonText(e.target.value)}
-              placeholder="Yedek JSON kodunu buraya yapıştırın..."
-              className={`w-full p-2.5 rounded-xl text-xs font-mono border outline-none ${inputClass}`}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                  const content = String(ev.target?.result || '');
+                  if (content) applyBackupPayload(content);
+                };
+                reader.readAsText(file);
+              }}
             />
 
             <button
               type="button"
-              disabled={!importJsonText.trim()}
-              onClick={() => applyBackupPayload(importJsonText)}
-              className={`w-full py-2.5 rounded-xl text-xs font-bold disabled:opacity-30 cursor-pointer ${primaryBtnClass}`}
+              onClick={() => fileInputRef.current?.click()}
+              className={`w-full py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition ${secondaryBtnClass}`}
             >
-              Yedeği Uygula
+              <Upload className="w-4 h-4 text-sky-500" />
+              <span>Yedek Dosyası Seç ve Yükle</span>
             </button>
           </div>
-        </div>
-      )}
 
-      {/* =====================================================================
-          SUB-PAGE 6: SİSTEM DOĞRULAMA
-         ===================================================================== */}
-      {activePage === 'diagnostics' && (
-        <div className="flex flex-col gap-3 pb-4 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-400">
-              {testResults.filter((r) => r.startsWith('✅')).length} / {testResults.length} test
-              başarılı
-            </span>
+          {/* Gelişmiş Veri Yönetimi (Yanlışlıkla Tıklamayı Önlemek İçin Gizli Alan) */}
+          <div className="pt-2">
             <button
               type="button"
-              onClick={() => {
-                setTestResults(runBuiltInTests());
-                showTemporaryFeedback('Yenilendi');
-              }}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${secondaryBtnClass}`}
+              onClick={() => setShowAdvancedResetZone((v) => !v)}
+              className="w-full py-2 px-3 rounded-xl text-[11px] font-semibold text-slate-400 hover:text-slate-300 flex items-center justify-between transition cursor-pointer"
             >
-              Yeniden Çalıştır
+              <span>Gelişmiş Cihaz Veri Yönetimi</span>
+              <span>{showAdvancedResetZone ? 'Gizle ▲' : 'Göster ▼'}</span>
             </button>
-          </div>
 
-          <div className={`font-mono text-xs ${listDivideClass}`}>
-            {testResults.map((line, idx) => (
-              <div key={idx} className="py-2.5">
-                {line}
+            {showAdvancedResetZone && (
+              <div
+                className={`mt-2 p-3.5 rounded-2xl border flex flex-col gap-2.5 animate-fade-in ${
+                  isLight
+                    ? 'bg-rose-50/70 border-rose-200/80'
+                    : 'bg-rose-950/20 border-rose-500/25'
+                }`}
+              >
+                <div className="text-[11px] text-slate-400 leading-relaxed">
+                  Bu işlem yalnızca bu cihazdaki yerel önbelleği ve oturum tercihlerini sıfırlar.
+                  Sunucudaki kurum ve nöbet verileriniz silinmez.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetConfirmChecked(false);
+                    setShowResetConfirm(true);
+                  }}
+                  className="w-full py-2 px-3 rounded-xl text-xs font-bold border border-rose-500/40 text-rose-500 hover:bg-rose-500/10 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Cihaz Verilerini Sıfırla...</span>
+                </button>
               </div>
-            ))}
+            )}
           </div>
         </div>
       )}
 
       {/* =====================================================================
-          SUB-PAGE 7: HAKKINDA
+          SUB-PAGE 7: UYGULAMA HAKKINDA (SADE STANDART TASARIM)
          ===================================================================== */}
       {activePage === 'about' && (
-        <div className="flex flex-col gap-4 pb-4 animate-fade-in text-xs">
-          {/* Developer Profile Header */}
+        <div className="flex flex-col gap-3.5 pb-4 animate-fade-in text-xs">
+          {/* App & Version Card */}
           <div
-            className={`p-3.5 rounded-2xl border flex items-center justify-between gap-3 ${
+            className={`p-4 rounded-2xl border flex items-center justify-between gap-3 ${
               isLight
-                ? 'bg-slate-100/80 border-slate-200/80 text-slate-900'
-                : 'bg-slate-900/60 border-slate-800 text-white'
+                ? 'bg-white border-slate-200/85 text-slate-900 shadow-2xs'
+                : 'bg-slate-900/55 border-slate-800/85 text-white'
+            }`}
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <img
+                src="/vardiya112logo.png"
+                alt="Vardiya 112"
+                className="w-11 h-11 rounded-2xl border border-rose-500/40 object-cover shrink-0"
+              />
+              <div className="min-w-0">
+                <div className="font-extrabold text-sm truncate">Vardiya 112</div>
+                <div className="text-slate-400 text-[11px] truncate">
+                  Kurumsal Nöbet ve Vardiya Takip Sistemi
+                </div>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-emerald-500/15 text-emerald-500 border border-emerald-500/25 shrink-0">
+              v3.0
+            </span>
+          </div>
+
+          {/* Developer Card */}
+          <div
+            className={`p-4 rounded-2xl border flex items-center justify-between gap-3 ${
+              isLight
+                ? 'bg-white border-slate-200/85 text-slate-900 shadow-2xs'
+                : 'bg-slate-900/55 border-slate-800/85 text-white'
             }`}
           >
             <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-full overflow-hidden border-2 border-rose-500 bg-slate-800 shrink-0 flex items-center justify-center font-black text-white">
+              <div className="w-10 h-10 rounded-full overflow-hidden border-2 border-rose-500 bg-slate-800 shrink-0 flex items-center justify-center font-black text-white">
                 <img
                   src="/tufan_profil.jpeg"
                   alt="Tufan UYSAL"
@@ -2901,150 +2391,439 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 />
               </div>
               <div>
-                <div className="font-extrabold text-sm">Tufan UYSAL</div>
+                <div className="font-extrabold text-xs">Tufan UYSAL</div>
                 <div className="text-slate-400 text-[11px]">
                   Uygulama Geliştiricisi · Kütahya 112 AÇM
                 </div>
               </div>
             </div>
-            <span className="px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-rose-500/15 text-rose-400 border border-rose-500/30 shrink-0">
-              v2.5 Güncel
-            </span>
           </div>
 
           <p
-            className={`p-3 rounded-xl border text-center italic font-medium ${
+            className={`p-3.5 rounded-2xl border text-center text-[11px] leading-relaxed ${
               isLight
-                ? 'bg-indigo-50/70 border-indigo-200/80 text-indigo-900'
-                : 'bg-indigo-950/30 border-indigo-500/25 text-indigo-200'
+                ? 'bg-slate-50 border-slate-200/80 text-slate-600'
+                : 'bg-slate-900/40 border-slate-800/80 text-slate-300'
             }`}
           >
-            "Mesai arkadaşlarıma vardiya ve nöbet takibinde kolaylık sağlaması amacıyla
-            geliştirilmiştir."
+            112 Acil Çağrı Merkezi, Emniyet, Jandarma, Sağlık, İtfaiye ve tüm nöbet usulü çalışan
+            personelin vardiya, izin ve aylık nöbet çizelgesi takibini kolaylaştırmak amacıyla
+            geliştirilmiştir.
           </p>
+        </div>
+      )}
 
-          {/* Categorized Feature List */}
-          <div className="flex flex-col gap-3">
-            <div
-              className={`p-3.5 rounded-2xl border flex flex-col gap-1.5 ${
-                isLight
-                  ? 'bg-slate-50 border-slate-200/80 text-slate-700'
-                  : 'bg-slate-900/50 border-slate-800/80 text-slate-300'
+      {/* =====================================================================
+          SUB-PAGE: THEMES & AUTO SUNRISE/SUNSET APPEARANCE
+         ===================================================================== */}
+      {activePage === 'themes' && (
+        <div className="flex flex-col gap-4 pb-8 animate-fade-in">
+          {/* Mod Seçici (Manuel vs Gün Doğumu / Batımı) */}
+          <div
+            className={`grid grid-cols-2 p-1 rounded-2xl border ${
+              isLight
+                ? 'bg-slate-100 border-slate-200/90'
+                : 'bg-slate-900/80 border-slate-800'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                if (settings.autoThemeEnabled) {
+                  onUpdateSettings({ ...settings, autoThemeEnabled: false });
+                  showTemporaryFeedback('Manuel tema modu');
+                }
+              }}
+              className={`py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                !settings.autoThemeEnabled
+                  ? isLight
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'bg-slate-800 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <div className="font-extrabold text-sky-400 flex items-center gap-1.5">
-                <span>🌍</span>
-                <span>Canlı 3D Dünya & Tek Elle Ergonomik Kullanım</span>
-              </div>
-              <ul className="space-y-1 list-disc list-inside text-[11px] leading-relaxed opacity-90">
-                <li>
-                  Gerçek zamanlı 3D Dünya küresi, gece/gündüz atmosferi ve aktif nöbet ilerleme yayı
-                  (% tamamlanma ve kalan süre).
-                </li>
-                <li>
-                  Nöbet ve Takvim sayfaları arasında sağa/sola kaydırarak (swipe) geçiş.
-                </li>
-                <li>
-                  Tek elle başparmak erişimine uygun alt navigasyon barı (Nöbet, Takvim, Tema,
-                  Ayarlar) ve boşluğa dokunarak ayarları kapatma.
-                </li>
-              </ul>
-            </div>
-
-            <div
-              className={`p-3.5 rounded-2xl border flex flex-col gap-1.5 ${
-                isLight
-                  ? 'bg-slate-50 border-slate-200/80 text-slate-700'
-                  : 'bg-slate-900/50 border-slate-800/80 text-slate-300'
+              <Palette className="w-3.5 h-3.5" />
+              <span>Manuel Tema</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!settings.autoThemeEnabled) {
+                  const currentIsLight = isLightTheme(settings.theme);
+                  onUpdateSettings({
+                    ...settings,
+                    autoThemeEnabled: true,
+                    autoThemeDay:
+                      settings.autoThemeDay || (currentIsLight ? settings.theme : 'light'),
+                    autoThemeNight:
+                      settings.autoThemeNight || (!currentIsLight ? settings.theme : 'dark'),
+                  });
+                  showTemporaryFeedback('Otomatik gün geçişi açıldı');
+                }
+              }}
+              className={`py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                settings.autoThemeEnabled
+                  ? isLight
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'bg-slate-800 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <div className="font-extrabold text-indigo-400 flex items-center gap-1.5">
-                <span>📅</span>
-                <span>Gelişmiş Takvim & Misafir (Tüm Gruplar) Görünümü</span>
-              </div>
-              <ul className="space-y-1 list-disc list-inside text-[11px] leading-relaxed opacity-90">
-                <li>
-                  <strong>👥 Misafir Görünümü:</strong> Gün kutucuklarını ikiye bölerek üstte{' '}
-                  <strong>☀️ Sabah</strong>, altta <strong>🌙 Gece</strong> çalışan grubu aylık
-                  tabloda tek bakışta gösterme.
-                </li>
-                <li>
-                  <strong>5&apos;li Grup Durum Kutucukları:</strong> Takvimde herhangi bir güne
-                  tıklayınca o günkü tüm grupların durumunu (☀️ Gündüz, 🌙 Gece, 🌅 Sabah çıkış,
-                  🛋️ İstirahat) özel renkleriyle anında görme.
-                </li>
-                <li>
-                  <strong>Basılı Tutarak Not/İstisna Ekleme:</strong> Takvimde bir güne basılı
-                  tutarak nöbet değişimi, icap veya not ekleme.
-                </li>
-                <li>
-                  Ay geçişlerinde boyutu değişmeyen sabit takvim alanı, tek elle ulaşılabilir ay
-                  değiştirme ve <strong>Canlı</strong> sıfırlama butonu.
-                </li>
-              </ul>
-            </div>
-
-            <div
-              className={`p-3.5 rounded-2xl border flex flex-col gap-1.5 ${
-                isLight
-                  ? 'bg-slate-50 border-slate-200/80 text-slate-700'
-                  : 'bg-slate-900/50 border-slate-800/80 text-slate-300'
-              }`}
-            >
-              <div className="font-extrabold text-rose-400 flex items-center gap-1.5">
-                <span>🔄</span>
-                <span>Akıllı Nöbet Değişimi (Becayiş) Takibi</span>
-              </div>
-              <ul className="space-y-1 list-disc list-inside text-[11px] leading-relaxed opacity-90">
-                <li>
-                  Nöbet değişimi yapılan eski günün kişisel takvimde otomatik olarak dinlenmeye
-                  çekilmesi; mavi nokta işaretinin yalnızca nöbete gelinecek yeni güne konulması.
-                </li>
-                <li>
-                  Değişim yapılan günlerde (ve gece nöbetiyse ertesi sabah çıkışında) değişim
-                  yapılan grubun personeli gibi sayılarak 5&apos;li grup kutucuklarındaki{' '}
-                  <strong>kırmızı vurgu çerçevesinin</strong> otomatik olarak o gruba taşınması.
-                </li>
-                <li>
-                  Bireysel nöbet değişimlerinde dahi grubun genel nöbet çizelgesinin korunması.
-                </li>
-              </ul>
-            </div>
-
-            <div
-              className={`p-3.5 rounded-2xl border flex flex-col gap-1.5 ${
-                isLight
-                  ? 'bg-slate-50 border-slate-200/80 text-slate-700'
-                  : 'bg-slate-900/50 border-slate-800/80 text-slate-300'
-              }`}
-            >
-              <div className="font-extrabold text-amber-400 flex items-center gap-1.5">
-                <span>⚡</span>
-                <span>Vardiya Şablonları, Sesli Ekleme & Dışa Aktarım</span>
-              </div>
-              <ul className="space-y-1 list-disc list-inside text-[11px] leading-relaxed opacity-90">
-                <li>
-                  112 Klasik 5 Grup (10/14 - 48 sa izin), 12/24-12/48 (4 Grup), 24/48 (3 Grup),
-                  24/72 (4 Grup) hazır sistemleri ve özelleştirilebilir saatler.
-                </li>
-                <li>
-                  Gruplara mikrofon ile Türkçe <strong>sesli personel ismi ekleme</strong>.
-                </li>
-                <li>
-                  Nöbet öncesi sesli bildirim hatırlatıcısı, <strong>.ics</strong> takvim dosyası
-                  indirme, aylık çizelge metni kopyalama, görsel paylaşma ve JSON yedekleme.
-                </li>
-              </ul>
-            </div>
+              {sunTimes.isDaytime ? (
+                <Sun className="w-3.5 h-3.5 text-amber-500" />
+              ) : (
+                <Moon className="w-3.5 h-3.5 text-sky-400" />
+              )}
+              <span>Gün Doğumu / Batımı</span>
+            </button>
           </div>
+
+          {!settings.autoThemeEnabled ? (
+            /* ---------------- MANUEL TEMA SEÇİMİ ---------------- */
+            <div className="flex flex-col gap-4">
+              {/* Karanlık Temalar */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between px-0.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <Moon className="w-3.5 h-3.5" />
+                    Karanlık Temalar
+                  </span>
+                  <span className="text-[10px] text-slate-400">{darkThemes.length} tema</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {darkThemes.map((tp) => {
+                    const isSelected = (settings.theme || 'dark') === tp.id;
+                    return (
+                      <button
+                        key={tp.id}
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({
+                            ...settings,
+                            theme: tp.id,
+                            autoThemeEnabled: false,
+                          });
+                          showTemporaryFeedback(`${tp.name} uygulandı`);
+                        }}
+                        className={`p-3 rounded-2xl border text-left flex flex-col gap-2.5 transition cursor-pointer ${
+                          isSelected
+                            ? isLight
+                              ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                              : 'bg-slate-800/95 text-white border-sky-400 shadow-sm'
+                            : isLight
+                            ? 'bg-white hover:bg-slate-50 border-slate-200/90 text-slate-800'
+                            : 'bg-slate-900/60 hover:bg-slate-800/70 border-slate-800/90 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1">
+                            {tp.previewSwatches.map((hex, idx) => (
+                              <span
+                                key={idx}
+                                className="w-4 h-4 rounded-full border border-white/25"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                          {isSelected && (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold leading-tight">{tp.name}</div>
+                          <div
+                            className={`text-[10px] mt-0.5 line-clamp-1 ${
+                              isSelected ? 'text-slate-300' : 'text-slate-400'
+                            }`}
+                          >
+                            {tp.subtitle}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Aydınlık Temalar */}
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between px-0.5">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <Sun className="w-3.5 h-3.5" />
+                    Aydınlık Temalar
+                  </span>
+                  <span className="text-[10px] text-slate-400">{lightThemes.length} tema</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {lightThemes.map((tp) => {
+                    const isSelected = (settings.theme || 'dark') === tp.id;
+                    return (
+                      <button
+                        key={tp.id}
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({
+                            ...settings,
+                            theme: tp.id,
+                            autoThemeEnabled: false,
+                          });
+                          showTemporaryFeedback(`${tp.name} uygulandı`);
+                        }}
+                        className={`p-3 rounded-2xl border text-left flex flex-col gap-2.5 transition cursor-pointer ${
+                          isSelected
+                            ? isLight
+                              ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                              : 'bg-slate-800/95 text-white border-sky-400 shadow-sm'
+                            : isLight
+                            ? 'bg-white hover:bg-slate-50 border-slate-200/90 text-slate-800'
+                            : 'bg-slate-900/60 hover:bg-slate-800/70 border-slate-800/90 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1">
+                            {tp.previewSwatches.map((hex, idx) => (
+                              <span
+                                key={idx}
+                                className="w-4 h-4 rounded-full border border-slate-400/30"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                          {isSelected && (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold leading-tight">{tp.name}</div>
+                          <div
+                            className={`text-[10px] mt-0.5 line-clamp-1 ${
+                              isSelected ? 'text-slate-300' : 'text-slate-400'
+                            }`}
+                          >
+                            {tp.subtitle}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* ---------------- GÜN DOĞUMU / BATIMI OTOMATİK MOD ---------------- */
+            <div className="flex flex-col gap-4">
+              {/* Güneş Saatleri ve Konum Kartı */}
+              <div
+                className={`p-3.5 rounded-2xl border flex flex-col gap-3 ${
+                  isLight
+                    ? 'bg-white border-slate-200/90 shadow-xs'
+                    : 'bg-slate-900/65 border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold">
+                      {sunTimes.isDaytime ? 'Şu an Gündüz Modu Aktif' : 'Şu an Gece Modu Aktif'}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      {sunTimes.isDaytime
+                        ? `Saat ${sunTimes.sunsetText} olunca gece temasına geçer`
+                        : `Saat ${sunTimes.sunriseText} olunca gündüz temasına geçer`}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={locatingSun}
+                      onClick={async () => {
+                        setLocatingSun(true);
+                        try {
+                          const coords = await requestCurrentLocation(10000);
+                          const nearest = findNearestProvinceByCoords(coords.lat, coords.lng);
+                          onUpdateSettings({
+                            ...settings,
+                            autoThemeLat: coords.lat,
+                            autoThemeLng: coords.lng,
+                            weatherCity: nearest.name,
+                          });
+                          showTemporaryFeedback(`Konum güncellendi (${nearest.name})`);
+                        } catch (err) {
+                          showTemporaryFeedback(
+                            err instanceof Error ? err.message : 'Konum izni alınamadı'
+                          );
+                        } finally {
+                          setLocatingSun(false);
+                        }
+                      }}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 ${
+                        isLight
+                          ? 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                          : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+                      }`}
+                    >
+                      <MapPin className="w-3.5 h-3.5 text-amber-500" />
+                      <span>
+                        {locatingSun
+                          ? 'Alınıyor...'
+                          : sunTimes.usingCustomLocation
+                          ? 'Konum Güncel'
+                          : 'Konum Kullan'}
+                      </span>
+                    </button>
+
+                    {sunTimes.usingCustomLocation && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({
+                            ...settings,
+                            autoThemeLat: undefined,
+                            autoThemeLng: undefined,
+                          });
+                          showTemporaryFeedback('Varsayılan konuma dönüldü');
+                        }}
+                        className="px-2 py-1.5 rounded-xl text-[11px] font-semibold text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                      >
+                        Sıfırla
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div
+                    className={`p-2.5 rounded-xl flex items-center gap-2.5 ${
+                      isLight ? 'bg-amber-50/80' : 'bg-slate-800/60'
+                    }`}
+                  >
+                    <Sun className="w-4 h-4 text-amber-500 shrink-0" />
+                    <div>
+                      <div className="text-[10px] text-slate-400 font-medium">Gün Doğumu</div>
+                      <div className="text-sm font-black tabular-nums">{sunTimes.sunriseText}</div>
+                    </div>
+                  </div>
+                  <div
+                    className={`p-2.5 rounded-xl flex items-center gap-2.5 ${
+                      isLight ? 'bg-indigo-50/80' : 'bg-slate-800/60'
+                    }`}
+                  >
+                    <Moon className="w-4 h-4 text-indigo-400 shrink-0" />
+                    <div>
+                      <div className="text-[10px] text-slate-400 font-medium">Gün Batımı</div>
+                      <div className="text-sm font-black tabular-nums">{sunTimes.sunsetText}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Gündüz Teması Seçimi */}
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-0.5 flex items-center gap-1.5">
+                  <Sun className="w-3.5 h-3.5 text-amber-500" />
+                  Gündüz Kullanılacak Tema
+                </span>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {lightThemes.map((tp) => {
+                    const activeDay = (settings.autoThemeDay || 'light') === tp.id;
+                    return (
+                      <button
+                        key={tp.id}
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({ ...settings, autoThemeDay: tp.id });
+                          showTemporaryFeedback(`Gündüz teması: ${tp.name}`);
+                        }}
+                        className={`p-3 rounded-2xl border text-left flex flex-col gap-2 transition cursor-pointer ${
+                          activeDay
+                            ? isLight
+                              ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                              : 'bg-slate-800/95 text-white border-amber-400 shadow-sm'
+                            : isLight
+                            ? 'bg-white hover:bg-slate-50 border-slate-200/90 text-slate-800'
+                            : 'bg-slate-900/60 hover:bg-slate-800/70 border-slate-800/90 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1">
+                            {tp.previewSwatches.map((hex, idx) => (
+                              <span
+                                key={idx}
+                                className="w-3.5 h-3.5 rounded-full border border-slate-400/30"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                          {activeDay && (
+                            <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
+                          )}
+                        </div>
+                        <div className="text-xs font-bold leading-tight">{tp.name}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Gece Teması Seçimi */}
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-0.5 flex items-center gap-1.5">
+                  <Moon className="w-3.5 h-3.5 text-sky-400" />
+                  Gece Kullanılacak Tema
+                </span>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {darkThemes.map((tp) => {
+                    const activeNight = (settings.autoThemeNight || 'dark') === tp.id;
+                    return (
+                      <button
+                        key={tp.id}
+                        type="button"
+                        onClick={() => {
+                          onUpdateSettings({ ...settings, autoThemeNight: tp.id });
+                          showTemporaryFeedback(`Gece teması: ${tp.name}`);
+                        }}
+                        className={`p-3 rounded-2xl border text-left flex flex-col gap-2 transition cursor-pointer ${
+                          activeNight
+                            ? isLight
+                              ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                              : 'bg-slate-800/95 text-white border-sky-400 shadow-sm'
+                            : isLight
+                            ? 'bg-white hover:bg-slate-50 border-slate-200/90 text-slate-800'
+                            : 'bg-slate-900/60 hover:bg-slate-800/70 border-slate-800/90 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1">
+                            {tp.previewSwatches.map((hex, idx) => (
+                              <span
+                                key={idx}
+                                className="w-3.5 h-3.5 rounded-full border border-white/25"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                          {activeNight && (
+                            <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
+                          )}
+                        </div>
+                        <div className="text-xs font-bold leading-tight">{tp.name}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* RESET CONFIRMATION DIALOG */}
       {showResetConfirm && (
         <div
-          onClick={() => setShowResetConfirm(false)}
-          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => {
+            setShowResetConfirm(false);
+            setResetConfirmChecked(false);
+          }}
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
         >
           <div
             onClick={(e) => e.stopPropagation()}
@@ -3054,29 +2833,56 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 : 'bg-[#111622] border-slate-800 text-white'
             }`}
           >
-            <div className="text-sm font-bold mb-1.5">Veriler Sıfırlansın mı?</div>
-            <p className="text-xs text-slate-400 leading-relaxed mb-4">
-              Kayıtlı nöbet referansınız, personel listesi ve notlarınız silinecektir.
+            <div className="flex items-center gap-2 text-rose-500 mb-1.5">
+              <Trash2 className="w-4 h-4 shrink-0" />
+              <div className="text-sm font-extrabold">Veri Sıfırlama Onayı</div>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed mb-3">
+              Bu cihazdaki yerel önbellek ve oturum bilgileriniz temizlenecektir. Sunucuya kayıtlı
+              kurum, personel, nöbet ve izin verileriniz silinmez.
             </p>
+
+            <label
+              className={`flex items-start gap-2.5 p-2.5 rounded-xl border text-[11px] font-semibold mb-4 cursor-pointer select-none ${
+                isLight
+                  ? 'bg-slate-50 border-slate-200 text-slate-700'
+                  : 'bg-slate-900/70 border-slate-800 text-slate-200'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={resetConfirmChecked}
+                onChange={(e) => setResetConfirmChecked(e.target.checked)}
+                className="mt-0.5 rounded accent-rose-600 cursor-pointer"
+              />
+              <span>Cihazdaki yerel uygulama verilerini sıfırlamayı onaylıyorum.</span>
+            </label>
+
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setShowResetConfirm(false)}
-                className={`py-2 rounded-lg text-xs font-semibold cursor-pointer ${secondaryBtnClass}`}
+                onClick={() => {
+                  setShowResetConfirm(false);
+                  setResetConfirmChecked(false);
+                }}
+                className={`py-2 rounded-xl text-xs font-semibold cursor-pointer ${secondaryBtnClass}`}
               >
                 Vazgeç
               </button>
               <button
                 type="button"
+                disabled={!resetConfirmChecked}
                 onClick={() => {
+                  if (!resetConfirmChecked) return;
                   setShowResetConfirm(false);
+                  setResetConfirmChecked(false);
+                  setShowAdvancedResetZone(false);
                   onResetAll();
                   setActivePage('main');
-                  showTemporaryFeedback('Sıfırlandı');
                 }}
-                className="py-2 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-700 text-white cursor-pointer"
+                className="py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 disabled:opacity-35 disabled:cursor-not-allowed text-white cursor-pointer transition"
               >
-                Sıfırla
+                Onayla ve Sıfırla
               </button>
             </div>
           </div>

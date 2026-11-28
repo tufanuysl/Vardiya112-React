@@ -1,6 +1,5 @@
-import React, { useEffect } from 'react';
-import { Bell, X, ShieldAlert, Sun, Moon, Sunrise } from 'lucide-react';
-import { NotificationSoundId } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import { Bell, X, CheckCircle2, Sun, Moon, Sunrise } from 'lucide-react';
 
 export interface ToastMessage {
   id: string;
@@ -12,172 +11,243 @@ export interface ToastMessage {
 
 interface ToastNotificationProps {
   toast: ToastMessage | null;
-  soundId?: NotificationSoundId;
   onClose: () => void;
 }
 
-export const playNotificationChime = (soundId: NotificationSoundId = 'chime') => {
-  if (soundId === 'silent') return;
-
+export const requestSystemNotificationPermission = async (): Promise<
+  'granted' | 'denied' | 'unsupported'
+> => {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  if (Notification.permission === 'granted') {
+    return 'granted';
+  }
   try {
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const now = ctx.currentTime;
-
-    if (soundId === 'telsiz') {
-      // 112 Telsiz: crisp double-beep radio chirp
-      const freqs = [1350, 1650];
-      freqs.forEach((f, idx) => {
-        const start = now + idx * 0.11;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(f, start);
-        gain.gain.setValueAtTime(0.18, start);
-        gain.gain.exponentialRampToValueAtTime(0.01, start + 0.08);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(start);
-        osc.stop(start + 0.085);
-      });
-      return;
-    }
-
-    if (soundId === 'radar') {
-      // Acil Uyarı: rising triple crystal pulse (E5 -> G#5 -> B5)
-      const notes = [659.25, 830.61, 987.77];
-      notes.forEach((f, idx) => {
-        const start = now + idx * 0.12;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(f, start);
-        gain.gain.setValueAtTime(0.18, start);
-        gain.gain.exponentialRampToValueAtTime(0.01, start + 0.14);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(start);
-        osc.stop(start + 0.15);
-      });
-      return;
-    }
-
-    if (soundId === 'soft') {
-      // Yumuşak Melodi: gentle warm chord arpeggio (F4 -> A4 -> C5)
-      const notes = [349.23, 440.0, 523.25];
-      notes.forEach((f, idx) => {
-        const start = now + idx * 0.14;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(f, start);
-        gain.gain.setValueAtTime(0.12, start);
-        gain.gain.exponentialRampToValueAtTime(0.008, start + 0.38);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(start);
-        osc.stop(start + 0.4);
-      });
-      return;
-    }
-
-    // Default 'chime': Two-tone pleasant chime (C5 -> G5)
-    const osc1 = ctx.createOscillator();
-    const gain1 = ctx.createGain();
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(523.25, now); // C5
-    osc1.frequency.exponentialRampToValueAtTime(783.99, now + 0.15); // G5
-    gain1.gain.setValueAtTime(0.15, now);
-    gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.45);
-    osc1.connect(gain1);
-    gain1.connect(ctx.destination);
-    osc1.start(now);
-    osc1.stop(now + 0.45);
+    const result = await Notification.requestPermission();
+    return result === 'granted' ? 'granted' : 'denied';
   } catch {
-    // Ignore audio autoplay restrictions
+    return 'denied';
   }
 };
 
-export const triggerSystemNotification = (title: string, message: string, silent = false) => {
-  // If native Notification API is supported and permitted
-  if ('Notification' in window && Notification.permission === 'granted') {
-    try {
-      new Notification(title, {
-        body: message,
-        icon: '/vardiya112logo.png',
-        badge: '/vardiya112logo.png',
-        silent,
-      });
-    } catch {
-      // Ignored if background notification blocked
+export const triggerSystemNotification = async (title: string, message: string) => {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+
+  const options: NotificationOptions = {
+    body: message,
+    icon: '/vardiya112logo.png',
+    badge: '/vardiya112logo.png',
+    silent: true,
+    tag: 'vardiya112-shift-reminder',
+  };
+
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg && typeof reg.showNotification === 'function') {
+        await reg.showNotification(title, options);
+        return;
+      }
     }
+  } catch {
+    // Fallback to standard Notification constructor below
+  }
+
+  try {
+    new Notification(title, options);
+  } catch {
+    // Ignored if background notification blocked
   }
 };
 
 export const ToastNotification: React.FC<ToastNotificationProps> = ({
   toast,
-  soundId = 'chime',
   onClose,
 }) => {
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [progress, setProgress] = useState(100);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  // Shorter, non-intrusive duration for routine changes (2.8s), slightly longer for shift alerts (4.5s)
+  const durationMs = toast?.type === 'custom' ? 2800 : 4500;
+
   useEffect(() => {
     if (!toast) return;
 
-    // Play selected notification sound (or silent)
-    playNotificationChime(soundId);
+    setDragOffset({ x: 0, y: 0 });
+    setIsDragging(false);
+    setProgress(100);
 
-    // Fire browser push if available
-    triggerSystemNotification(toast.title, toast.message, soundId === 'silent');
+    // Trigger system OS notification only for shift reminders / shift events / tests
+    if (toast.type !== 'custom') {
+      void triggerSystemNotification(toast.title, toast.message);
+    }
 
-    // Auto-dismiss after 7 seconds
-    const timer = setTimeout(() => {
+    const rafId = window.requestAnimationFrame(() => {
+      setProgress(0);
+    });
+
+    const timer = window.setTimeout(() => {
       onClose();
-    }, 7000);
+    }, durationMs);
 
-    return () => clearTimeout(timer);
-  }, [toast, soundId, onClose]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(timer);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [toast, durationMs, onClose]);
 
   if (!toast) return null;
 
-  const getIcon = () => {
+  const getVisualConfig = () => {
     switch (toast.type) {
       case 'day-start':
-        return <Sun className="w-5 h-5 text-amber-400" />;
+        return {
+          icon: <Sun className="w-4 h-4 text-amber-400" />,
+          borderClass: 'border-amber-500/45',
+          badgeBgClass: 'bg-amber-500/15 border-amber-500/30',
+          barClass: 'bg-amber-400',
+        };
       case 'night-start':
-        return <Moon className="w-5 h-5 text-indigo-400" />;
+        return {
+          icon: <Moon className="w-4 h-4 text-indigo-400" />,
+          borderClass: 'border-indigo-500/45',
+          badgeBgClass: 'bg-indigo-500/15 border-indigo-500/30',
+          barClass: 'bg-indigo-400',
+        };
       case 'shift-end':
-        return <Sunrise className="w-5 h-5 text-sky-400" />;
+        return {
+          icon: <Sunrise className="w-4 h-4 text-sky-400" />,
+          borderClass: 'border-sky-500/45',
+          badgeBgClass: 'bg-sky-500/15 border-sky-500/30',
+          barClass: 'bg-sky-400',
+        };
       case 'test':
-        return <Bell className="w-5 h-5 text-emerald-400" />;
+        return {
+          icon: <Bell className="w-4 h-4 text-emerald-400" />,
+          borderClass: 'border-emerald-500/45',
+          badgeBgClass: 'bg-emerald-500/15 border-emerald-500/30',
+          barClass: 'bg-emerald-400',
+        };
       default:
-        return <ShieldAlert className="w-5 h-5 text-rose-500" />;
+        return {
+          icon: <CheckCircle2 className="w-4 h-4 text-emerald-400" />,
+          borderClass: 'border-emerald-500/35',
+          badgeBgClass: 'bg-emerald-500/15 border-emerald-500/25',
+          barClass: 'bg-emerald-400',
+        };
     }
   };
 
+  const visual = getVisualConfig();
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    setIsDragging(true);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = Math.min(20, e.clientY - dragStartRef.current.y);
+    setDragOffset({ x: dx, y: dy });
+
+    // Dismiss immediately if swiped up or sideways
+    if (dy < -28 || Math.abs(dx) > 75) {
+      dragStartRef.current = null;
+      setIsDragging(false);
+      onClose();
+    }
+  };
+
+  const handlePointerUp = () => {
+    if (!dragStartRef.current) return;
+    const { x, y } = dragOffset;
+    dragStartRef.current = null;
+    setIsDragging(false);
+
+    // If barely moved, treat tapping anywhere on the banner as an instant dismiss
+    if (Math.abs(x) < 8 && Math.abs(y) < 8) {
+      onClose();
+      return;
+    }
+    setDragOffset({ x: 0, y: 0 });
+  };
+
   return (
-    <div className="fixed top-4 inset-x-0 z-50 flex justify-center px-4 pointer-events-none animate-bounce-short">
-      <div className="pointer-events-auto w-full max-w-sm rounded-2xl bg-[#0F172A]/95 border border-red-500/50 shadow-2xl backdrop-blur-xl p-3.5 text-white flex items-start gap-3 transition-all transform duration-300">
-        <div className="w-9 h-9 rounded-xl bg-slate-800/80 border border-slate-700/80 flex items-center justify-center shrink-0 mt-0.5 shadow-sm">
-          {getIcon()}
+    <div className="fixed top-2.5 inset-x-0 z-[120] flex justify-center px-3 pointer-events-none select-none">
+      <div
+        role="status"
+        aria-live="polite"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={() => {
+          dragStartRef.current = null;
+          setIsDragging(false);
+          setDragOffset({ x: 0, y: 0 });
+        }}
+        style={{
+          transform: `translate3d(${dragOffset.x}px, ${dragOffset.y}px, 0)`,
+          opacity: Math.max(0.25, 1 - Math.abs(dragOffset.x) / 160 - Math.max(0, -dragOffset.y) / 70),
+        }}
+        title="Kapatmak için dokunun veya kaydırın"
+        className={`pointer-events-auto w-full max-w-sm rounded-2xl bg-[#0F172A]/95 border ${visual.borderClass} shadow-xl backdrop-blur-xl px-3 py-2.5 text-white flex items-center gap-2.5 cursor-pointer relative overflow-hidden ${
+          isDragging ? '' : 'transition-all duration-200 ease-out animate-fade-in'
+        }`}
+      >
+        <div
+          className={`w-8 h-8 rounded-xl border flex items-center justify-center shrink-0 ${visual.badgeBgClass}`}
+        >
+          {visual.icon}
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-xs font-black tracking-wide text-white truncate">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-extrabold tracking-tight text-white truncate">
               {toast.title}
             </span>
-            <span className="text-[10px] text-slate-400">{toast.timestamp}</span>
+            <span className="text-[10px] text-slate-400 shrink-0">· {toast.timestamp}</span>
           </div>
-          <p className="text-xs text-slate-200 mt-0.5 leading-snug">{toast.message}</p>
+          <p className="text-[11px] text-slate-300 mt-0.5 leading-snug line-clamp-2">
+            {toast.message}
+          </p>
         </div>
 
         <button
           type="button"
-          onClick={onClose}
-          className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose();
+          }}
+          className="h-7 px-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 active:scale-95 border border-slate-700/80 text-slate-200 hover:text-white text-[11px] font-bold flex items-center gap-1 shrink-0 transition cursor-pointer"
+          aria-label="Bildirimi Kapat"
         >
-          <X className="w-4 h-4" />
+          <span>Kapat</span>
+          <X className="w-3.5 h-3.5" />
         </button>
+
+        {/* Auto-dismiss countdown progress bar */}
+        <div className="absolute bottom-0 inset-x-0 h-0.5 bg-slate-800/80">
+          <div
+            style={{
+              width: `${progress}%`,
+              transitionDuration: `${durationMs}ms`,
+            }}
+            className={`h-full ${visual.barClass} transition-[width] ease-linear`}
+          />
+        </div>
       </div>
     </div>
   );

@@ -50,12 +50,12 @@ export const THEME_PRESETS: ThemePreset[] = [
     highlightTextClass: 'text-rose-400',
     popoverBorderClass: 'bg-[#111622]/98 border-rose-500/40 text-slate-100 shadow-black/80',
     accentHex: '#f43f5e',
-    earthAtmosphereHex: 0x6366f1,
-    earthRimHex: 0xe0e7ff,
+    earthAtmosphereHex: 0x3b4fd8,
+    earthRimHex: 0x6366f1,
     earthCircleStroke: 'rgba(99, 102, 241, 0.22)',
-    skyTopRgba: 'rgba(15, 23, 58, 0.88)',
-    skyMidRgba: 'rgba(17, 24, 52, 0.55)',
-    skyZenithRgba: 'rgba(59, 130, 246, 0.14)',
+    skyTopRgba: 'rgba(11, 17, 42, 0.92)',
+    skyMidRgba: 'rgba(12, 18, 40, 0.56)',
+    skyZenithRgba: 'rgba(59, 130, 246, 0.10)',
     previewSwatches: ['#090D16', '#1E1B4B', '#F43F5E'],
   },
   {
@@ -267,4 +267,136 @@ export function getThemePreset(themeId?: string): ThemePreset {
 
 export function isLightTheme(themeId?: string): boolean {
   return getThemePreset(themeId).isLight;
+}
+
+export interface SunTimesInfo {
+  sunrise: Date;
+  sunset: Date;
+  sunriseText: string;
+  sunsetText: string;
+  isDaytime: boolean;
+  usingCustomLocation: boolean;
+}
+
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+function computeSolarEventLocalHours(
+  date: Date,
+  lat: number,
+  lng: number,
+  isSunrise: boolean
+): number {
+  const startOfYear = new Date(date.getFullYear(), 0, 0);
+  const diffMs = date.getTime() - startOfYear.getTime();
+  const dayOfYear = Math.floor(diffMs / 86400000);
+
+  const lngHour = lng / 15;
+  const t = dayOfYear + ((isSunrise ? 6 : 18) - lngHour) / 24;
+
+  const meanAnomaly = 0.9856 * t - 3.289;
+  let trueLng =
+    meanAnomaly +
+    1.916 * Math.sin(meanAnomaly * DEG_TO_RAD) +
+    0.02 * Math.sin(2 * meanAnomaly * DEG_TO_RAD) +
+    282.634;
+  trueLng = ((trueLng % 360) + 360) % 360;
+
+  let rightAsc = RAD_TO_DEG * Math.atan(0.91764 * Math.tan(trueLng * DEG_TO_RAD));
+  rightAsc = ((rightAsc % 360) + 360) % 360;
+  const lQuadrant = Math.floor(trueLng / 90) * 90;
+  const raQuadrant = Math.floor(rightAsc / 90) * 90;
+  rightAsc = (rightAsc + (lQuadrant - raQuadrant)) / 15;
+
+  const sinDec = 0.39782 * Math.sin(trueLng * DEG_TO_RAD);
+  const cosDec = Math.cos(Math.asin(sinDec));
+
+  // Official sunrise/sunset zenith = 90°50' (90.8333°)
+  const cosH =
+    (Math.cos(90.8333 * DEG_TO_RAD) - sinDec * Math.sin(lat * DEG_TO_RAD)) /
+    (cosDec * Math.cos(lat * DEG_TO_RAD));
+
+  if (cosH > 1) return isSunrise ? 7 : 17; // Fallback for polar night
+  if (cosH < -1) return isSunrise ? 4 : 22; // Fallback for midnight sun
+
+  const hDeg = isSunrise
+    ? 360 - RAD_TO_DEG * Math.acos(cosH)
+    : RAD_TO_DEG * Math.acos(cosH);
+  const hHours = hDeg / 15;
+
+  const localMeanTime = hHours + rightAsc - 0.06571 * t - 6.622;
+  const utHours = (((localMeanTime - lngHour) % 24) + 24) % 24;
+
+  const localOffsetHours = -date.getTimezoneOffset() / 60;
+  return (((utHours + localOffsetHours) % 24) + 24) % 24;
+}
+
+export function calculateSunTimes(
+  date: Date = new Date(),
+  customLat?: number,
+  customLng?: number
+): SunTimesInfo {
+  const hasCustom =
+    typeof customLat === 'number' &&
+    typeof customLng === 'number' &&
+    Number.isFinite(customLat) &&
+    Number.isFinite(customLng);
+
+  // Default to Ankara/Turkey center when in TRT (+3), otherwise estimate solar meridian from local timezone
+  const localOffsetHours = -date.getTimezoneOffset() / 60;
+  const lat = hasCustom ? customLat : 39.9334;
+  const lng = hasCustom
+    ? customLng
+    : Math.abs(localOffsetHours - 3) < 0.1
+    ? 32.8597
+    : localOffsetHours * 15;
+
+  const sunriseHours = computeSolarEventLocalHours(date, lat, lng, true);
+  const sunsetHours = computeSolarEventLocalHours(date, lat, lng, false);
+
+  const toLocalDate = (hoursFloat: number) => {
+    const totalMinutes = Math.round(hoursFloat * 60);
+    const hh = Math.floor(totalMinutes / 60) % 24;
+    const mm = totalMinutes % 60;
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hh, mm, 0, 0);
+  };
+
+  const sunrise = toLocalDate(sunriseHours);
+  const sunset = toLocalDate(sunsetHours);
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  const nowMs = date.getTime();
+  const isDaytime = nowMs >= sunrise.getTime() && nowMs < sunset.getTime();
+
+  return {
+    sunrise,
+    sunset,
+    sunriseText: `${pad(sunrise.getHours())}:${pad(sunrise.getMinutes())}`,
+    sunsetText: `${pad(sunset.getHours())}:${pad(sunset.getMinutes())}`,
+    isDaytime,
+    usingCustomLocation: hasCustom,
+  };
+}
+
+export function resolveEffectiveThemeId(
+  settings: {
+    theme: AppThemeId;
+    autoThemeEnabled?: boolean;
+    autoThemeDay?: AppThemeId;
+    autoThemeNight?: AppThemeId;
+    autoThemeLat?: number;
+    autoThemeLng?: number;
+  },
+  now: Date = new Date()
+): AppThemeId {
+  if (!settings.autoThemeEnabled) {
+    return settings.theme || 'dark';
+  }
+  const sun = calculateSunTimes(now, settings.autoThemeLat, settings.autoThemeLng);
+  if (sun.isDaytime) {
+    const dayTheme = settings.autoThemeDay || 'light';
+    return getThemePreset(dayTheme).isLight ? dayTheme : 'light';
+  }
+  const nightTheme = settings.autoThemeNight || 'dark';
+  return !getThemePreset(nightTheme).isLight ? nightTheme : 'dark';
 }

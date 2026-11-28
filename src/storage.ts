@@ -113,9 +113,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   groupNames: ['1. Grup', '2. Grup', '3. Grup', '4. Grup', '5. Grup'],
   groupMembers: ['', '', '', '', ''],
   theme: 'dark',
+  autoThemeEnabled: false,
+  autoThemeDay: 'light',
+  autoThemeNight: 'dark',
   defaultStartTab: 'home',
+  weatherCity: 'İstanbul',
   reminderMinutesBefore: 30,
-  notificationSound: 'chime',
+  notificationSound: 'silent',
 };
 
 export const DEFAULT_REFS: RefRecord[] = [];
@@ -166,7 +170,7 @@ export const loadStoredSettings = (): AppSettings => {
       restHours: restH,
       dayRestHours: typeof parsed.dayRestHours === 'number' ? parsed.dayRestHours : restH,
       nightRestHours: typeof parsed.nightRestHours === 'number' ? parsed.nightRestHours : restH,
-      notificationSound: parsed.notificationSound || DEFAULT_SETTINGS.notificationSound,
+      notificationSound: 'silent',
       groupNames:
         Array.isArray(parsed.groupNames) && parsed.groupNames.length > 0
           ? parsed.groupNames

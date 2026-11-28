@@ -1,0 +1,29 @@
+{
+  "appId": "com.tufanuysal.vardiya112",
+  "appName": "Vardiya 112",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "hostname": "localhost",
+    "cleartext": true,
+    "allowNavigation": [
+      "*.firebaseapp.com",
+      "*.googleapis.com",
+      "*.google.com",
+      "*.gstatic.com",
+      "*.run.app",
+      "api.open-meteo.com"
+    ]
+  },
+  "plugins": {
+    "GoogleAuth": {
+      "scopes": ["profile", "email"],
+      "serverClientId": "695298772500-1kckkrdr5ds07rjdq3bnr7kieoca9v6s.apps.googleusercontent.com",
+      "forceCodeForRefreshToken": true
+    },
+    "FirebaseAuthentication": {
+      "skipNativeAuth": false,
+      "providers": ["google.com"]
+    }
+  }
+}

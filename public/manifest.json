@@ -1,0 +1,18 @@
+{
+  "name": "Vardiya 112",
+  "short_name": "Vardiya 112",
+  "description": "112 Acil Çağrı Merkezi, Emniyet, Jandarma, Sağlık, İtfaiye ve AFAD kurum bazlı canlı vardiya takip ve nöbet çizelgesi sistemi.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "lang": "tr",
+  "icons": [
+    {
+      "src": "/vardiya112logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

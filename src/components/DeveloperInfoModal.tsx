@@ -66,12 +66,48 @@ export const DeveloperInfoModal: React.FC<DeveloperInfoModalProps> = ({ settings
           <div
             className={`flex flex-col gap-1.5 p-3.5 rounded-2xl border ${
               isLight
+                ? 'bg-indigo-50/80 border-indigo-200 text-slate-700'
+                : 'bg-[#1E293B]/80 border-indigo-500/40 text-slate-200'
+            }`}
+          >
+            <span className={`text-xs font-extrabold ${isLight ? 'text-indigo-700' : 'text-indigo-300'}`}>
+              v3.0 Kurumsal Bulut & Resmi Çizelge Sürümü (Kasım 2026)
+            </span>
+            <ul className="text-xs space-y-1.5 list-disc list-inside leading-relaxed opacity-95">
+              <li>
+                <strong>Kurum Bazlı Canlı Sunucu Altyapısı:</strong> Çağrı Alıcı, Polis, Jandarma,
+                112 Sağlık, İtfaiye, AFAD ve Güvenlik birimleri için kurum bazlı canlı vardiya
+                yayını ve anlık senkronizasyon.
+              </li>
+              <li>
+                <strong>Ana Yönetici & Yetkili Kurum Admini Sistemi:</strong> Yalnızca Ana Yönetici
+                tarafından yetkilendirilen Kurum Adminlerinin resmi veri girebilmesi; bireysel
+                kullanıcıların girdiği izin, icap ve değişim taleplerinin <strong>Yönetici Onayı</strong>{' '}
+                ile otomatik olarak ana takvime ve çizelge tablosuna geçiş yapması.
+              </li>
+              <li>
+                <strong>Resmi Aylık Nöbet Çizelgesi Tablosu (Tam Liste):</strong> İlk açılışta tüm
+                listeye hakim <strong>Tam Liste</strong> görünümü; 1. sırada Kırmızı Grup Sorumlusu,
+                2. sırada Mavi Grup Sorumlusu Yardımcısı, Sarı kutucukta <strong>S / A</strong>{' '}
+                kodlu İcap Nöbeti, Mor kutucukta <strong>İZİNLİ</strong> gösterimi ve PNG paylaşımı.
+              </li>
+              <li>
+                <strong>Kaydırmalı (Swipe) Takvim & Canlı Hava Durumu:</strong> Takvim üzerinde
+                sağa/sola kaydırarak ay değiştirme, 81 il canlı meteoroloji ve GPS konum desteği,
+                Android APK tam uyumluluğu.
+              </li>
+            </ul>
+          </div>
+
+          <div
+            className={`flex flex-col gap-1.5 p-3.5 rounded-2xl border ${
+              isLight
                 ? 'bg-purple-50/70 border-purple-200 text-slate-700'
-                : 'bg-[#1E293B]/70 border-slate-700/60 text-slate-300'
+                : 'bg-[#1E293B]/60 border-slate-700/60 text-slate-300'
             }`}
           >
             <span className={`text-xs font-bold ${isLight ? 'text-purple-700' : 'text-purple-400'}`}>
-              v2.5 Güncel Sürüm (Kasım 2026)
+              v2.5 3D Nöbet Dünyası & Akıllı Takvim
             </span>
             <ul className="text-xs space-y-1 list-disc list-inside leading-relaxed opacity-90">
               <li>
@@ -79,18 +115,8 @@ export const DeveloperInfoModal: React.FC<DeveloperInfoModalProps> = ({ settings
                 ikiye bölerek Sabah (☀️) ve Gece (🌙) nöbetçisi grupları bir arada gösterme.
               </li>
               <li>
-                <strong>Takvimde 5&apos;li Grup Kutucukları:</strong> Güne tıklayınca tüm grupların
-                o günkü durumunu görme; güne <strong>basılı tutunca</strong> istisna/not/becayiş
-                ekleme.
-              </li>
-              <li>
-                <strong>Akıllı Becayiş Vurgusu:</strong> Nöbet değişilen günlerde değişim yapılan
-                grubun personeli gibi sayılarak kırmızı grup çerçevesinin otomatik taşınması ve
-                yalnızca gelinecek güne mavi nokta konulması.
-              </li>
-              <li>
-                <strong>Ergonomik Tek El Tasarımı:</strong> Alt navigasyon barında Nöbet, Takvim,
-                Tema ve Ayarlar erişimi; sabit boyutlu ferah takvim ve büyütülmüş 3D Dünya küresi.
+                <strong>Akıllı Becayiş Vurgusu:</strong> Nöbet değişilen günlerde kırmızı grup
+                çerçevesinin otomatik taşınması ve 3D Dünya üzerinde canlı vardiya ilerleme yayı.
               </li>
             </ul>
           </div>
@@ -107,7 +133,8 @@ export const DeveloperInfoModal: React.FC<DeveloperInfoModalProps> = ({ settings
             </span>
             <p className="text-xs leading-relaxed">
               112 5 grup özel döngüsü, çoklu vardiya şablonları (12/24-48, 24/48, 24/72), Türkçe
-              sesli personel ekleme, .ics takvim dışa aktarımı, görsel paylaşım ve JSON yedekleme.
+              sesli personel ekleme, PDF/Fotoğraftan otomatik vardiya okuma, .ics takvim dışa
+              aktarımı ve JSON yedekleme.
             </p>
           </div>
 
@@ -120,7 +147,7 @@ export const DeveloperInfoModal: React.FC<DeveloperInfoModalProps> = ({ settings
             }`}
           >
             <p className="text-xs font-medium italic">
-              "Mesai arkadaşlarıma vardiya takibinde kolaylık sağlaması dileğiyle..."
+              "Tüm kurumlarımızdaki mesai arkadaşlarıma vardiya ve nöbet takibinde kolaylık sağlaması dileğiyle..."
             </p>
           </div>
 

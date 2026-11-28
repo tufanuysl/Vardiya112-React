@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { User } from 'firebase/auth';
 import {
   UserCheck,
   UserPlus,
@@ -15,21 +16,23 @@ import {
 } from 'lucide-react';
 import {
   AppSettings,
-  NoteItem,
+  InstitutionUnitDoc,
   ProfileAvatarColor,
   RefRecord,
+  UnitProfileLockDoc,
   UserProfile,
 } from '../types';
 import {
   AVATAR_COLORS,
-  ensureMemberInGroupList,
   findMatchingGroupByName,
 } from '../storage';
 import {
   getGroupAnchorDateTime,
+  isSamePersonNameTR,
   querySingleDayForGroup,
   toISODate,
   trDateFormatter,
+  verifyGoogleAccountMatchesPerson,
 } from '../shiftEngine';
 
 interface ProfileManagerModalProps {
@@ -38,6 +41,11 @@ interface ProfileManagerModalProps {
   settings: AppSettings;
   activeRefHistory: RefRecord[];
   isLight: boolean;
+  activeUnit?: InstitutionUnitDoc | null;
+  activeUnitProfileLocks?: UnitProfileLockDoc[];
+  currentUser?: User | null;
+  isAuthorizedAdmin?: boolean;
+  onTriggerToast?: (title: string, message: string) => void;
   onSelectProfile: (profileId: string) => void;
   onSaveProfile: (
     profile: UserProfile,
@@ -63,6 +71,8 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
   settings,
   activeRefHistory,
   isLight,
+  currentUser,
+  onTriggerToast,
   onSelectProfile,
   onSaveProfile,
   onDeleteProfile,
@@ -79,7 +89,6 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
   const [selectedGroupIdx, setSelectedGroupIdx] = useState<number>(0);
   const [isMatchApproved, setIsMatchApproved] = useState<boolean>(false);
   const [matchedSourceLabel, setMatchedSourceLabel] = useState<string>('Manuel Seçim');
-  const [addNameToGroupMembers, setAddNameToGroupMembers] = useState<boolean>(true);
 
   // Shift-date-based group finder state
   const [showDateFinder, setShowDateFinder] = useState<boolean>(false);
@@ -142,7 +151,6 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
     setSelectedGroupIdx(0);
     setIsMatchApproved(false);
     setMatchedSourceLabel('Manuel Seçim');
-    setAddNameToGroupMembers(true);
     setShowDateFinder(false);
   };
 
@@ -155,7 +163,6 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
     setSelectedGroupIdx(p.groupIdx);
     setIsMatchApproved(p.isGroupConfirmed);
     setMatchedSourceLabel(p.matchedSource || 'Onaylı Grup');
-    setAddNameToGroupMembers(true);
     setShowDateFinder(false);
   };
 
@@ -204,6 +211,19 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
 
   const handleConfirmAndSaveProfile = () => {
     const cleanName = nameInput.trim() || 'Kullanıcı Profili';
+
+    if (
+      currentUser &&
+      cleanName !== 'Ana Profilim' &&
+      !verifyGoogleAccountMatchesPerson(cleanName, currentUser).matched
+    ) {
+      onTriggerToast?.(
+        'Google Hesap İsmi Eşleşmiyor',
+        `"${cleanName}" ismi giriş yaptığınız Google hesabının adıyla eşleşmiyor. Yalnızca kendi adınızla profil oluşturabilirsiniz.`
+      );
+      return;
+    }
+
     const safeGroupIdx = Math.max(0, Math.min(settings.numGroups - 1, selectedGroupIdx));
 
     const existingProfile = editingProfileId
@@ -219,25 +239,31 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
       avatarColor,
       groupIdx: safeGroupIdx,
       isGroupConfirmed: true,
-      matchedSource: autoNameMatch && autoNameMatch.groupIdx === safeGroupIdx
-        ? `Otomatik İsim Eşleşmesi (${autoNameMatch.matchedMemberName})`
-        : matchedSourceLabel,
+      matchedSource:
+        autoNameMatch && autoNameMatch.groupIdx === safeGroupIdx
+          ? `Otomatik İsim Eşleşmesi (${autoNameMatch.matchedMemberName})`
+          : matchedSourceLabel,
       refHistory: nextRefs,
-      notes: existingProfile ? existingProfile.notes : [],
+      notes:
+        existingProfile && isSamePersonNameTR(existingProfile.name, cleanName)
+          ? (existingProfile.notes || []).filter((it) => {
+              if (cleanName === 'Ana Profilim') return true;
+              const np = (it.swapMyPerson || '').trim();
+              const sp = (it.swapWithPerson || '').trim();
+              return (
+                (Boolean(np) && isSamePersonNameTR(cleanName, np)) ||
+                (it.type === 'Nöbet Değişimi' && Boolean(sp) && isSamePersonNameTR(cleanName, sp))
+              );
+            })
+          : [],
       createdAt: existingProfile ? existingProfile.createdAt : new Date().toISOString(),
     };
 
     let updatedSettings: AppSettings | undefined;
-    if (addNameToGroupMembers && cleanName.length >= 2) {
-      const nextMembers = ensureMemberInGroupList(
-        cleanName,
-        safeGroupIdx,
-        settings.groupMembers,
-        settings.numGroups
-      );
+    if (cleanName !== 'Ana Profilim') {
       updatedSettings = {
         ...settings,
-        groupMembers: nextMembers,
+        activeWorkerName: cleanName,
       };
     }
 
@@ -436,7 +462,7 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Otomatik İsim-Grup Eşleşme Onay Uyarısı (Eğer personel listesinde ismi başka grupta tespit edildiyse) */}
+                  {/* Otomatik İsim-Grup Eşleşme Onay Uyarısı */}
                   {hasUnconfirmedAutoMatch && liveMatch && (
                     <div
                       className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
@@ -522,11 +548,11 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
               />
             </div>
 
-            {/* Kayıtlı Personellerden Hızlı Seçim Çipleri (Eğer personel listesinde kayıtlı isimler varsa) */}
+            {/* Kayıtlı Personellerden Hızlı Seçim Çipleri */}
             {allKnownStaffMembers.length > 0 && (
               <div>
                 <span className="text-[10px] font-semibold text-slate-400 block mb-1">
-                  Veya Sistemde Kayıtlı Personellerden İsminize Dokunun (Otomatik Eşleşir):
+                  Veya Sistemde Kayıtlı Personellerden İsminize Dokunun:
                 </span>
                 <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
                   {allKnownStaffMembers.map((item, idx) => {
@@ -543,7 +569,7 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
                           setMatchedSourceLabel(`Personel Listesi (${item.name})`);
                           setIsMatchApproved(true);
                         }}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition cursor-pointer flex items-center gap-1 ${
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition flex items-center gap-1 cursor-pointer ${
                           isSelectedChip
                             ? 'bg-emerald-600 border-emerald-500 text-white'
                             : isLight
@@ -795,25 +821,6 @@ export const ProfileManagerModal: React.FC<ProfileManagerModalProps> = ({
               })}
             </div>
 
-            {/* İsim Personel Listesinde Yoksa Otomatik Ekleme Onayı */}
-            {nameInput.trim().length >= 2 &&
-              (!autoNameMatch || autoNameMatch.groupIdx !== selectedGroupIdx) && (
-                <label className="flex items-center gap-2 text-[11px] text-slate-400 pt-1 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={addNameToGroupMembers}
-                    onChange={(e) => setAddNameToGroupMembers(e.target.checked)}
-                    className="accent-emerald-500 w-3.5 h-3.5 rounded cursor-pointer"
-                  />
-                  <span>
-                    <strong>&ldquo;{nameInput.trim()}&rdquo;</strong> ismini{' '}
-                    <strong>
-                      {settings.groupNames[selectedGroupIdx] || `${selectedGroupIdx + 1}. Grup`}
-                    </strong>{' '}
-                    personel listesine de kaydet (Sonraki aramalarda otomatik eşleşir)
-                  </span>
-                </label>
-              )}
           </div>
 
           {/* KAYDET VE ONAYLA BUTONU */}

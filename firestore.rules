@@ -1,0 +1,832 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net (Default-Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPersonKey(personKey) {
+      return personKey is string &&
+        personKey.size() >= 2 &&
+        personKey.size() <= 80 &&
+        personKey.matches('^[a-z0-9_\\-]+$');
+    }
+
+    function isValidEmailKey(emailKey) {
+      return emailKey is string &&
+        emailKey.size() >= 5 &&
+        emailKey.size() <= 120 &&
+        emailKey.matches('^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // Super Admin (Ana Yönetici): Only the root owner can add/remove institution admins
+    function isSuperAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email.lower() == 'tufanuysal4545@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Authorized Institution Admin: Either Super Admin or explicitly authorized by Super Admin in /authorizedAdmins/{email}
+    function isAuthorizedAdmin() {
+      return isSuperAdmin() || (
+        isVerifiedUser() &&
+        request.auth.token.email is string &&
+        exists(/databases/$(database)/documents/authorizedAdmins/$(request.auth.token.email.lower()))
+      );
+    }
+
+    function isValidTimeHHMM(val) {
+      return val is string && val.size() == 5 && val.matches('^[0-2][0-9]:[0-5][0-9]$');
+    }
+
+    function isValidISODate(val) {
+      return val is string && val.size() == 10 && val.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    // 2. Entity Validation Blueprint: AuthorizedAdmin
+    function isValidAuthorizedAdmin(data, adminEmail) {
+      return data.keys().hasAll([
+        'email',
+        'name',
+        'institutionType',
+        'unitCode',
+        'addedByEmail',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'email',
+        'name',
+        'institutionType',
+        'unitCode',
+        'addedByEmail',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.email is string && data.email.size() >= 5 && data.email.size() <= 120 && data.email == adminEmail &&
+      data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+      data.institutionType is string && data.institutionType.size() >= 2 && data.institutionType.size() <= 30 &&
+      data.institutionType in ['ALL', 'CAGRI_ALICI', 'POLIS', 'JANDARMA', 'ITFAIYE', 'SAGLIK_112', 'AFAD', 'ORMAN', 'DIGER'] &&
+      data.unitCode is string && data.unitCode.size() <= 40 &&
+      data.addedByEmail is string && data.addedByEmail.size() >= 5 && data.addedByEmail.size() <= 120 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 3. Entity Validation Blueprint: InstitutionUnit
+    function isValidInstitutionUnit(data) {
+      return data.keys().hasAll([
+        'name',
+        'institutionType',
+        'city',
+        'unitCode',
+        'ownerUid',
+        'ownerName',
+        'adminUids',
+        'numGroups',
+        'is24HourSystem',
+        'dayStart',
+        'dayEnd',
+        'nightStart',
+        'nightEnd',
+        'shift24Start',
+        'restHours',
+        'dayRestHours',
+        'nightRestHours',
+        'shiftTransition',
+        'groupCycleMode',
+        'groupNames',
+        'groupMembers',
+        'refDate',
+        'refGroupIdx',
+        'refType',
+        'announcement',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'name',
+        'institutionType',
+        'city',
+        'unitCode',
+        'ownerUid',
+        'ownerName',
+        'adminUids',
+        'numGroups',
+        'is24HourSystem',
+        'dayStart',
+        'dayEnd',
+        'nightStart',
+        'nightEnd',
+        'shift24Start',
+        'restHours',
+        'dayRestHours',
+        'nightRestHours',
+        'shiftTransition',
+        'groupCycleMode',
+        'groupNames',
+        'groupMembers',
+        'refDate',
+        'refGroupIdx',
+        'refType',
+        'announcement',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+      data.institutionType is string && data.institutionType.size() >= 2 && data.institutionType.size() <= 30 &&
+      data.institutionType in ['CAGRI_ALICI', 'POLIS', 'JANDARMA', 'ITFAIYE', 'SAGLIK_112', 'AFAD', 'ORMAN', 'DIGER'] &&
+      data.city is string && data.city.size() >= 2 && data.city.size() <= 50 &&
+      data.unitCode is string && data.unitCode.size() >= 2 && data.unitCode.size() <= 40 && data.unitCode.matches('^[A-Z0-9_\\-]+$') &&
+      data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+      data.ownerName is string && data.ownerName.size() >= 1 && data.ownerName.size() <= 100 &&
+      data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 10 &&
+      data.adminUids[0] is string && data.adminUids[0].size() >= 1 && data.adminUids[0].size() <= 128 &&
+      data.numGroups is int && data.numGroups >= 2 && data.numGroups <= 10 &&
+      data.is24HourSystem is bool &&
+      isValidTimeHHMM(data.dayStart) &&
+      isValidTimeHHMM(data.dayEnd) &&
+      isValidTimeHHMM(data.nightStart) &&
+      isValidTimeHHMM(data.nightEnd) &&
+      isValidTimeHHMM(data.shift24Start) &&
+      data.restHours is int && data.restHours >= 12 && data.restHours <= 168 &&
+      data.dayRestHours is int && data.dayRestHours >= 12 && data.dayRestHours <= 168 &&
+      data.nightRestHours is int && data.nightRestHours >= 12 && data.nightRestHours <= 168 &&
+      data.shiftTransition is string && data.shiftTransition.size() >= 4 && data.shiftTransition.size() <= 12 &&
+      data.shiftTransition in ['ALTERNATE', 'SAME'] &&
+      data.groupCycleMode is string && data.groupCycleMode.size() >= 10 && data.groupCycleMode.size() <= 15 &&
+      data.groupCycleMode in ['112_CLASSIC', 'SEQUENTIAL'] &&
+      data.groupNames is list && data.groupNames.size() >= 2 && data.groupNames.size() <= 10 &&
+      data.groupNames[0] is string && data.groupNames[0].size() >= 1 && data.groupNames[0].size() <= 60 &&
+      data.groupMembers is list && data.groupMembers.size() >= 2 && data.groupMembers.size() <= 10 &&
+      data.groupMembers[0] is string && data.groupMembers[0].size() <= 1200 &&
+      isValidISODate(data.refDate) &&
+      data.refGroupIdx is int && data.refGroupIdx >= 0 && data.refGroupIdx < data.numGroups &&
+      data.refType is string && data.refType.size() >= 5 && data.refType.size() <= 6 &&
+      data.refType in ['GUNDUZ', 'AKSAM'] &&
+      data.announcement is string && data.announcement.size() <= 400 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 4. Entity Validation Blueprint: UnitRosterNote
+    function isValidUnitRosterNote(data, unitId) {
+      return data.keys().hasAll([
+        'unitId',
+        'date',
+        'type',
+        'personName',
+        'groupIdx',
+        'swapWithPerson',
+        'swapTargetDate',
+        'swapShiftType',
+        'desc',
+        'authorUid',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'unitId',
+        'date',
+        'type',
+        'personName',
+        'groupIdx',
+        'swapWithPerson',
+        'swapTargetDate',
+        'swapShiftType',
+        'desc',
+        'authorUid',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.unitId is string && data.unitId.size() >= 1 && data.unitId.size() <= 128 && data.unitId == unitId &&
+      isValidISODate(data.date) &&
+      data.type is string && data.type.size() >= 2 && data.type.size() <= 40 &&
+      data.type in ['Nöbet Değişimi', 'İzin / Rapor', 'İcap Nöbeti', 'Nöbet Boşa Çıkarma', 'Ek Nöbet', 'Görevlendirme', 'Not', 'Diğer'] &&
+      data.personName is string && data.personName.size() >= 2 && data.personName.size() <= 100 &&
+      data.groupIdx is int && data.groupIdx >= 0 && data.groupIdx <= 9 &&
+      data.swapWithPerson is string && data.swapWithPerson.size() <= 100 &&
+      data.swapTargetDate is string && data.swapTargetDate.size() <= 10 &&
+      (data.swapTargetDate.size() == 0 || isValidISODate(data.swapTargetDate)) &&
+      data.swapShiftType is string && data.swapShiftType.size() >= 5 && data.swapShiftType.size() <= 6 &&
+      data.swapShiftType in ['GUNDUZ', 'AKSAM'] &&
+      data.desc is string && data.desc.size() <= 240 &&
+      data.authorUid is string && data.authorUid.size() >= 1 && data.authorUid.size() <= 128 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 5. Entity Validation Blueprint: UnitLeaveRequest
+    function isValidUnitLeaveRequest(data, unitId) {
+      return data.keys().hasAll([
+        'unitId',
+        'startDate',
+        'endDate',
+        'type',
+        'personName',
+        'groupIdx',
+        'swapWithPerson',
+        'swapTargetDate',
+        'swapShiftType',
+        'desc',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'unitId',
+        'startDate',
+        'endDate',
+        'type',
+        'personName',
+        'groupIdx',
+        'swapWithPerson',
+        'swapTargetDate',
+        'swapShiftType',
+        'desc',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.unitId is string && data.unitId.size() >= 1 && data.unitId.size() <= 128 && data.unitId == unitId &&
+      isValidISODate(data.startDate) &&
+      isValidISODate(data.endDate) &&
+      data.type is string && data.type.size() >= 2 && data.type.size() <= 40 &&
+      data.type in ['Nöbet Değişimi', 'İzin / Rapor', 'İcap Nöbeti', 'Nöbet Boşa Çıkarma', 'Ek Nöbet', 'Görevlendirme', 'Not', 'Diğer'] &&
+      data.personName is string && data.personName.size() >= 2 && data.personName.size() <= 100 &&
+      data.groupIdx is int && data.groupIdx >= 0 && data.groupIdx <= 9 &&
+      data.swapWithPerson is string && data.swapWithPerson.size() <= 100 &&
+      data.swapTargetDate is string && data.swapTargetDate.size() <= 10 &&
+      (data.swapTargetDate.size() == 0 || isValidISODate(data.swapTargetDate)) &&
+      data.swapShiftType is string && data.swapShiftType.size() >= 5 && data.swapShiftType.size() <= 6 &&
+      data.swapShiftType in ['GUNDUZ', 'AKSAM'] &&
+      data.desc is string && data.desc.size() <= 240 &&
+      data.status is string && data.status.size() >= 7 && data.status.size() <= 8 &&
+      data.status in ['PENDING', 'APPROVED', 'REJECTED'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 5b. Entity Validation Blueprint: UnitProfileLock (Anti-Impersonation Verified Google Ownership Lock, Zero PII)
+    function isValidUnitProfileLock(data, unitId, personKey) {
+      return data.keys().hasAll([
+        'unitId',
+        'personKey',
+        'personName',
+        'groupIdx',
+        'ownerUid',
+        'ownerDisplayLabel',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'unitId',
+        'personKey',
+        'personName',
+        'groupIdx',
+        'ownerUid',
+        'ownerDisplayLabel',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.unitId is string && data.unitId.size() >= 1 && data.unitId.size() <= 128 && data.unitId == unitId &&
+      isValidPersonKey(data.personKey) && data.personKey == personKey &&
+      data.personName is string && data.personName.size() >= 2 && data.personName.size() <= 100 &&
+      data.groupIdx is int && data.groupIdx >= 0 && data.groupIdx <= 9 &&
+      data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+      data.ownerDisplayLabel is string && data.ownerDisplayLabel.size() <= 40 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 5c. Entity Validation Blueprint: UnitTableMeta (Shared Table Customization & Cell Highlights, Zero PII)
+    function isValidUnitTableMeta(data, unitId) {
+      return data.keys().hasAll([
+        'unitId',
+        'tableTheme',
+        'fontSize',
+        'rowDensity',
+        'highlightWeekends',
+        'zebraGroups',
+        'colorizeShiftCodes',
+        'showTotalsColumn',
+        'highlightToday',
+        'boldGroupDividers',
+        'showLegend',
+        'customTitle',
+        'cellHighlights',
+        'updatedByUid',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'unitId',
+        'tableTheme',
+        'fontSize',
+        'rowDensity',
+        'highlightWeekends',
+        'zebraGroups',
+        'colorizeShiftCodes',
+        'showTotalsColumn',
+        'highlightToday',
+        'boldGroupDividers',
+        'showLegend',
+        'customTitle',
+        'cellHighlights',
+        'updatedByUid',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.unitId is string && data.unitId.size() >= 1 && data.unitId.size() <= 128 && data.unitId == unitId &&
+      data.tableTheme is string && data.tableTheme.size() >= 4 && data.tableTheme.size() <= 10 &&
+      data.tableTheme in ['classic', 'modern', 'dark', 'contrast'] &&
+      data.fontSize is string && data.fontSize.size() >= 2 && data.fontSize.size() <= 4 &&
+      data.fontSize in ['sm', 'md', 'lg'] &&
+      data.rowDensity is string && data.rowDensity.size() >= 6 && data.rowDensity.size() <= 12 &&
+      data.rowDensity in ['compact', 'normal', 'comfortable'] &&
+      data.highlightWeekends is bool &&
+      data.zebraGroups is bool &&
+      data.colorizeShiftCodes is bool &&
+      data.showTotalsColumn is bool &&
+      data.highlightToday is bool &&
+      data.boldGroupDividers is bool &&
+      data.showLegend is bool &&
+      data.customTitle is string && data.customTitle.size() <= 120 &&
+      data.cellHighlights is map && data.cellHighlights.size() <= 500 &&
+      data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 5d. Entity Validation Blueprint: UserCloudProfile (Owner-only Cloud Session Recovery, Zero PII)
+    function isValidUserCloudProfile(data, userId) {
+      return data.keys().hasAll([
+        'ownerUid',
+        'activeUnitId',
+        'activeUnitCity',
+        'appRoleMode',
+        'workerName',
+        'myGroupIdx',
+        'kvkkAccepted',
+        'theme',
+        'defaultStartTab',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerUid',
+        'activeUnitId',
+        'activeUnitCity',
+        'appRoleMode',
+        'workerName',
+        'myGroupIdx',
+        'kvkkAccepted',
+        'theme',
+        'defaultStartTab',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 && data.ownerUid == userId &&
+      data.activeUnitId is string && data.activeUnitId.size() <= 128 &&
+      data.activeUnitCity is string && data.activeUnitCity.size() <= 50 &&
+      data.appRoleMode is string && data.appRoleMode.size() >= 5 && data.appRoleMode.size() <= 9 &&
+      data.appRoleMode in ['personnel', 'admin'] &&
+      data.workerName is string && data.workerName.size() <= 100 &&
+      data.myGroupIdx is int && data.myGroupIdx >= 0 && data.myGroupIdx <= 9 &&
+      data.kvkkAccepted is bool &&
+      data.theme is string && data.theme.size() >= 2 && data.theme.size() <= 20 &&
+      data.defaultStartTab is string && data.defaultStartTab.size() >= 4 && data.defaultStartTab.size() <= 8 &&
+      data.defaultStartTab in ['home', 'calendar'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 5e. Entity Validation Blueprint: UnitAnnouncement (Official Announcements & PDF Attachments)
+    function isValidUnitAnnouncement(data, unitId) {
+      return data.keys().hasAll([
+        'unitId',
+        'title',
+        'content',
+        'authorName',
+        'authorUid',
+        'attachmentName',
+        'attachmentType',
+        'attachmentDataUrl',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'unitId',
+        'title',
+        'content',
+        'authorName',
+        'authorUid',
+        'attachmentName',
+        'attachmentType',
+        'attachmentDataUrl',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.unitId is string && data.unitId.size() >= 1 && data.unitId.size() <= 128 && data.unitId == unitId &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+      data.content is string && data.content.size() >= 1 && data.content.size() <= 2000 &&
+      data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 100 &&
+      data.authorUid is string && data.authorUid.size() >= 1 && data.authorUid.size() <= 128 &&
+      data.attachmentName is string && data.attachmentName.size() <= 160 &&
+      data.attachmentType is string && data.attachmentType.size() <= 80 &&
+      data.attachmentDataUrl is string && data.attachmentDataUrl.size() <= 900000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 6. Master Gate Helper for Subcollections under /units/{unitId}
+    function isParentUnitBureauAdmin(unitId) {
+      return isAuthorizedAdmin() &&
+        exists(/databases/$(database)/documents/units/$(unitId)) && (
+          isSuperAdmin() ||
+          get(/databases/$(database)/documents/units/$(unitId)).data.ownerUid == request.auth.uid ||
+          request.auth.uid in get(/databases/$(database)/documents/units/$(unitId)).data.adminUids ||
+          exists(/databases/$(database)/documents/authorizedAdmins/$(request.auth.token.email.lower()))
+        );
+    }
+
+    // 7. Collection: /authorizedAdmins/{adminEmail}
+    match /authorizedAdmins/{adminEmail} {
+      allow get: if isVerifiedUser() &&
+        isValidEmailKey(adminEmail) &&
+        (isSuperAdmin() || request.auth.token.email.lower() == adminEmail);
+
+      allow list: if isSuperAdmin() || (
+        isVerifiedUser() &&
+        request.auth.token.email is string &&
+        existing().email == request.auth.token.email.lower()
+      );
+
+      allow create: if isSuperAdmin() &&
+        isValidEmailKey(adminEmail) &&
+        isValidAuthorizedAdmin(incoming(), adminEmail) &&
+        incoming().addedByEmail == request.auth.token.email.lower() &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSuperAdmin() &&
+        isValidEmailKey(adminEmail) &&
+        isValidAuthorizedAdmin(incoming(), adminEmail) &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'institutionType',
+          'unitCode',
+          'addedByEmail',
+          'updatedAt'
+        ]);
+
+      allow delete: if isSuperAdmin() && isValidEmailKey(adminEmail);
+    }
+
+    // 7b. Collection: /userProfiles/{userId} (Strict Owner-Only Session & Preference Recovery)
+    match /userProfiles/{userId} {
+      allow get: if isVerifiedUser() &&
+        isValidId(userId) &&
+        request.auth.uid == userId;
+
+      allow list: if false;
+
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserCloudProfile(incoming(), userId) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserCloudProfile(incoming(), userId) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'activeUnitId',
+          'activeUnitCity',
+          'appRoleMode',
+          'workerName',
+          'myGroupIdx',
+          'kvkkAccepted',
+          'theme',
+          'defaultStartTab',
+          'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedUser() &&
+        isValidId(userId) &&
+        request.auth.uid == userId;
+    }
+
+    // 8. Collection: /units/{unitId}
+    match /units/{unitId} {
+      allow get: if isValidId(unitId);
+      allow list: if existing().numGroups >= 2 && existing().numGroups <= 10;
+
+      allow create: if isAuthorizedAdmin() &&
+        isValidId(unitId) &&
+        isValidInstitutionUnit(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        request.auth.uid in incoming().adminUids &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isAuthorizedAdmin() &&
+        isValidId(unitId) &&
+        isValidInstitutionUnit(incoming()) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isSuperAdmin() ||
+          (
+            (
+              existing().ownerUid == request.auth.uid ||
+              request.auth.uid in existing().adminUids ||
+              exists(/databases/$(database)/documents/authorizedAdmins/$(request.auth.token.email.lower()))
+            ) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name',
+              'institutionType',
+              'city',
+              'unitCode',
+              'ownerName',
+              'adminUids',
+              'numGroups',
+              'is24HourSystem',
+              'dayStart',
+              'dayEnd',
+              'nightStart',
+              'nightEnd',
+              'shift24Start',
+              'restHours',
+              'dayRestHours',
+              'nightRestHours',
+              'shiftTransition',
+              'groupCycleMode',
+              'groupNames',
+              'groupMembers',
+              'refDate',
+              'refGroupIdx',
+              'refType',
+              'announcement',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSuperAdmin() && isValidId(unitId);
+
+      // 9. Subcollection: /units/{unitId}/rosterNotes/{noteId}
+      match /rosterNotes/{noteId} {
+        allow get: if isValidId(unitId) && isValidId(noteId);
+        allow list: if isValidId(unitId) && existing().unitId == unitId;
+
+        allow create: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(noteId) &&
+          isValidUnitRosterNote(incoming(), unitId) &&
+          incoming().authorUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId);
+
+        allow update: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(noteId) &&
+          isValidUnitRosterNote(incoming(), unitId) &&
+          incoming().unitId == existing().unitId &&
+          incoming().authorUid == existing().authorUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId) && (
+            isSuperAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'date',
+              'type',
+              'personName',
+              'groupIdx',
+              'swapWithPerson',
+              'swapTargetDate',
+              'swapShiftType',
+              'desc',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(noteId) &&
+          isParentUnitBureauAdmin(unitId);
+      }
+
+      // 10. Subcollection: /units/{unitId}/leaveRequests/{reqId}
+      match /leaveRequests/{reqId} {
+        allow get: if isValidId(unitId) && isValidId(reqId);
+        allow list: if isValidId(unitId) && existing().unitId == unitId;
+
+        // Any individual user can submit a PENDING leave/icap/swap request for their connected unit
+        allow create: if isValidId(unitId) &&
+          isValidId(reqId) &&
+          isValidUnitLeaveRequest(incoming(), unitId) &&
+          incoming().status == 'PENDING' &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/units/$(unitId));
+
+        // Only Authorized Admins can update (approve/reject) a leave request
+        allow update: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(reqId) &&
+          isValidUnitLeaveRequest(incoming(), unitId) &&
+          incoming().unitId == existing().unitId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId) && (
+            isSuperAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'desc',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(reqId) &&
+          isParentUnitBureauAdmin(unitId);
+      }
+
+      // 11. Subcollection: /units/{unitId}/profileLocks/{personKey}
+      match /profileLocks/{personKey} {
+        allow get: if isValidId(unitId) && isValidPersonKey(personKey);
+        allow list: if isValidId(unitId) && existing().unitId == unitId;
+
+        allow create: if isVerifiedUser() &&
+          isValidId(unitId) &&
+          isValidPersonKey(personKey) &&
+          isValidUnitProfileLock(incoming(), unitId, personKey) &&
+          incoming().ownerUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/units/$(unitId));
+
+        allow update: if isVerifiedUser() &&
+          isValidId(unitId) &&
+          isValidPersonKey(personKey) &&
+          isValidUnitProfileLock(incoming(), unitId, personKey) &&
+          incoming().unitId == existing().unitId &&
+          incoming().personKey == existing().personKey &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time && (
+            (
+              existing().ownerUid == request.auth.uid &&
+              incoming().ownerUid == existing().ownerUid &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'personName',
+                'groupIdx',
+                'ownerDisplayLabel',
+                'updatedAt'
+              ])
+            ) ||
+            (
+              isParentUnitBureauAdmin(unitId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'personName',
+                'groupIdx',
+                'ownerUid',
+                'ownerDisplayLabel',
+                'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidId(unitId) &&
+          isValidPersonKey(personKey) && (
+            existing().ownerUid == request.auth.uid ||
+            isParentUnitBureauAdmin(unitId)
+          );
+      }
+
+      // 12. Subcollection: /units/{unitId}/tableMeta/{metaId} (Shared Table Theme, Title & Cell Highlights)
+      match /tableMeta/{metaId} {
+        allow get: if isValidId(unitId) && isValidId(metaId);
+        allow list: if false;
+
+        allow create: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(metaId) &&
+          isValidUnitTableMeta(incoming(), unitId) &&
+          incoming().updatedByUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId);
+
+        allow update: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(metaId) &&
+          isValidUnitTableMeta(incoming(), unitId) &&
+          incoming().unitId == existing().unitId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedByUid == request.auth.uid &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId) && (
+            isSuperAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'tableTheme',
+              'fontSize',
+              'rowDensity',
+              'highlightWeekends',
+              'zebraGroups',
+              'colorizeShiftCodes',
+              'showTotalsColumn',
+              'highlightToday',
+              'boldGroupDividers',
+              'showLegend',
+              'customTitle',
+              'cellHighlights',
+              'updatedByUid',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(metaId) &&
+          isParentUnitBureauAdmin(unitId);
+      }
+
+      // 13. Subcollection: /units/{unitId}/announcements/{annId} (Official General Announcements & Attached PDFs)
+      match /announcements/{annId} {
+        allow get: if isValidId(unitId) && isValidId(annId);
+        allow list: if isValidId(unitId) && existing().unitId == unitId;
+
+        allow create: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(annId) &&
+          isValidUnitAnnouncement(incoming(), unitId) &&
+          incoming().authorUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId);
+
+        allow update: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(annId) &&
+          isValidUnitAnnouncement(incoming(), unitId) &&
+          incoming().unitId == existing().unitId &&
+          incoming().authorUid == existing().authorUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentUnitBureauAdmin(unitId) && (
+            isSuperAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'content',
+              'authorName',
+              'attachmentName',
+              'attachmentType',
+              'attachmentDataUrl',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isAuthorizedAdmin() &&
+          isValidId(unitId) &&
+          isValidId(annId) &&
+          isParentUnitBureauAdmin(unitId);
+      }
+    }
+  }
+}

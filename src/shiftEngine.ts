@@ -213,6 +213,24 @@ export const generateGroupShiftsInWindow = (
   return shifts.sort((a, b) => a.startDT.getTime() - b.startDT.getTime());
 };
 
+export const findWorkerGroupIdxInSettings = (
+  workerName: string | undefined | null,
+  settings: AppSettings
+): number | null => {
+  const clean = (workerName || '').trim();
+  if (!clean) return null;
+  for (let g = 0; g < settings.numGroups; g++) {
+    const members = (settings.groupMembers[g] || '')
+      .split(/[,;\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (members.some((m) => isSamePersonNameTR(m, clean))) {
+      return g;
+    }
+  }
+  return null;
+};
+
 export const querySingleDayForGroup = (
   isoDateStr: string,
   groupIdx: number | null | undefined,
@@ -238,8 +256,13 @@ export const querySingleDayForGroup = (
     };
   }
 
+  const activeWorker = (settings.activeWorkerName || '').trim();
+  const matchedWorkerGroupIdx = findWorkerGroupIdxInSettings(activeWorker, settings);
+  const personalGroupIdx =
+    matchedWorkerGroupIdx !== null ? matchedWorkerGroupIdx : ref.myGroupIdx;
+
   const actualGroupIdx =
-    groupIdx === null || groupIdx === undefined || groupIdx === -1 ? ref.myGroupIdx : groupIdx;
+    groupIdx === null || groupIdx === undefined || groupIdx === -1 ? personalGroupIdx : groupIdx;
   const gName = settings.groupNames[actualGroupIdx] || `${actualGroupIdx + 1}. Grup`;
   const d = createLocalDate(isoDateStr);
   const winStart = addDays(new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0), -1);
@@ -283,58 +306,209 @@ export const querySingleDayForGroup = (
   }
 
   let finalStatusText = parts.join(' + ');
-  const dayNotes = (notes || []).filter(
-    (it) => it.date === isoDateStr || it.swapTargetDate === isoDateStr
-  );
+
+  const groupMemberList = (settings.groupMembers[actualGroupIdx] || '')
+    .split(/[,;\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
   const isMyGroup =
-    groupIdx === null || groupIdx === undefined || groupIdx === -1 || groupIdx === ref.myGroupIdx;
+    groupIdx === null ||
+    groupIdx === undefined ||
+    groupIdx === -1 ||
+    groupIdx === personalGroupIdx ||
+    groupIdx === ref.myGroupIdx;
 
-  if (isMyGroup) {
-    const givenAway = (notes || []).find(
-      (it) =>
-        it.type === 'Nöbet Değişimi' &&
-        it.date === isoDateStr &&
-        it.swapTargetDate &&
-        it.swapTargetDate.trim() !== ''
-    );
-    if (givenAway && givenAway.swapTargetDate) {
-      dayShift = null;
-      nightShift = null;
-      const partnerSuffix = givenAway.swapWithPerson
-        ? ` · ${givenAway.swapWithPerson} ile`
-        : '';
-      finalStatusText = `İzinli (${trDateFormatter(givenAway.swapTargetDate)}${partnerSuffix} değişti)`;
+  const isNoteForThisView = (it: NoteItem): boolean => {
+    const notePerson = (it.swapMyPerson || '').trim();
+    const swapPartner = (it.swapWithPerson || '').trim();
+    const matchesActiveWorker =
+      Boolean(activeWorker) &&
+      ((Boolean(notePerson) && isSamePersonNameTR(activeWorker, notePerson)) ||
+        (it.type === 'Nöbet Değişimi' &&
+          Boolean(swapPartner) &&
+          isSamePersonNameTR(activeWorker, swapPartner)));
+
+    // Individual / personal calendar views must never leak another group's individual leaves
+    if (!isMyGroup) {
+      return false;
     }
 
-    const prevGivenAwayDateISO = toISODate(addDays(d, -1));
-    const prevGivenAway = (notes || []).find(
-      (it) =>
-        it.type === 'Nöbet Değişimi' &&
-        it.date === prevGivenAwayDateISO &&
-        it.swapTargetDate &&
-        it.swapTargetDate.trim() !== ''
+    // 1. Official bureau cloud note -> strictly visible ONLY to the specific person it belongs to
+    if (it.cloudNoteId) {
+      if (!activeWorker) {
+        return false;
+      }
+      return matchesActiveWorker;
+    }
+
+    // 2. Local note explicitly matching activeWorker (or untagged local note on this user's own profile)
+    if (activeWorker) {
+      if (!notePerson && !swapPartner) {
+        return typeof it.targetGroupIdx !== 'number' || it.targetGroupIdx === actualGroupIdx;
+      }
+      return matchesActiveWorker;
+    }
+
+    if (typeof it.targetGroupIdx === 'number' && it.targetGroupIdx !== actualGroupIdx) {
+      return false;
+    }
+
+    if (notePerson) {
+      // If activeWorker is not yet set, allow personal untargeted swaps (legacy/tests) or 1-person groups,
+      // but never leak a named colleague's leave onto other members of a multi-person group.
+      if (it.type === 'Nöbet Değişimi' && typeof it.targetGroupIdx !== 'number') {
+        return true;
+      }
+      return groupMemberList.length <= 1;
+    }
+
+    return true;
+  };
+
+  const applicableNotes = (notes || []).filter(isNoteForThisView);
+  const dayNotes = applicableNotes.filter(
+    (it) => it.date === isoDateStr || it.swapTargetDate?.trim() === isoDateStr
+  );
+
+  const isSwapPartnerForNote = (it: NoteItem): boolean => {
+    if (it.type !== 'Nöbet Değişimi') return false;
+    const notePerson = (it.swapMyPerson || '').trim();
+    const swapPartner = (it.swapWithPerson || '').trim();
+    if (!activeWorker || !swapPartner) return false;
+    return (
+      isSamePersonNameTR(activeWorker, swapPartner) &&
+      (!notePerson || !isSamePersonNameTR(activeWorker, notePerson))
     );
-    if (prevGivenAway && morningCarryover) {
+  };
+
+  if (isMyGroup || applicableNotes.length > 0) {
+    const prevDateISO = toISODate(addDays(d, -1));
+
+    // 0. Check for Nöbet Boşa Çıkarma FIRST (clears base shift before any takenOver / Ek Nöbet applies)
+    const isCancelNote = (it: NoteItem, targetISO: string): boolean => {
+      if (it.date !== targetISO || it.type === 'Nöbet Değişimi') return false;
+      const lower = `${it.type} ${it.desc}`.toLocaleLowerCase('tr-TR');
+      return (
+        it.type === 'Nöbet Boşa Çıkarma' ||
+        lower.includes('boşa çıkar') ||
+        lower.includes('nöbet iptal')
+      );
+    };
+
+    const cancelShiftNote = applicableNotes.find((it) => isCancelNote(it, isoDateStr));
+    if (cancelShiftNote) {
+      dayShift = null;
+      nightShift = null;
+      finalStatusText = `⬜ Boş (Nöbet Boşa Çıkarıldı${
+        cancelShiftNote.desc ? ` · ${cancelShiftNote.desc}` : ''
+      })`;
+    }
+
+    const prevCancelNote = applicableNotes.find((it) => isCancelNote(it, prevDateISO));
+    if (prevCancelNote && morningCarryover) {
       morningCarryover = null;
-      if (!dayShift && !nightShift) {
+      if (!dayShift && !nightShift && !cancelShiftNote) {
         finalStatusText = 'Dinlenme (Tam Gün İzinli)';
       }
     }
 
-    const takenOver = (notes || []).find(
-      (it) => it.type === 'Nöbet Değişimi' && it.swapTargetDate === isoDateStr
-    );
+    // Helper to classify Nöbet Değişimi notes:
+    // - Direct single-date shift change: !isPartner && !swapTargetDate && !swapWithPerson -> assigns swapShiftType on it.date
+    // - Same-day shift move: !isPartner && swapTargetDate === it.date -> assigns swapShiftType on it.date
+    // - Standard multi-day move or partner swap: givenAway on source date, takenOver on target date
+    const isGivenAwayOnDate = (it: NoteItem, targetISO: string): boolean => {
+      if (it.type !== 'Nöbet Değişimi') return false;
+      const isPartner = isSwapPartnerForNote(it);
+      const cleanTarget = (it.swapTargetDate || '').trim();
+      const cleanPartner = (it.swapWithPerson || '').trim();
+      if (!isPartner) {
+        if (!cleanTarget && !cleanPartner) return false; // Direct single-date shift change to swapShiftType
+        if (cleanTarget === it.date) return false; // Same-day morning<->evening move handled in takenOver
+        return it.date === targetISO;
+      }
+      return Boolean(cleanTarget && cleanTarget !== it.date && cleanTarget === targetISO);
+    };
+
+    const isTakenOverOnDate = (it: NoteItem, targetISO: string): boolean => {
+      if (it.type !== 'Nöbet Değişimi') return false;
+      const isPartner = isSwapPartnerForNote(it);
+      const cleanTarget = (it.swapTargetDate || '').trim();
+      const cleanPartner = (it.swapWithPerson || '').trim();
+      if (!isPartner) {
+        if (cleanTarget) return cleanTarget === targetISO;
+        if (!cleanPartner) return it.date === targetISO; // Direct single-date shift change
+        return false;
+      }
+      return it.date === targetISO;
+    };
+
+    // 1. Day given away (off duty due to swap)
+    const givenAway = applicableNotes.find((it) => isGivenAwayOnDate(it, isoDateStr));
+    if (givenAway) {
+      const isPartner = isSwapPartnerForNote(givenAway);
+      dayShift = null;
+      nightShift = null;
+      if (!isPartner) {
+        const targetPart =
+          givenAway.swapTargetDate && givenAway.swapTargetDate.trim() !== ''
+            ? trDateFormatter(givenAway.swapTargetDate)
+            : 'Nöbet Değişimi';
+        const partnerSuffix = givenAway.swapWithPerson
+          ? ` · ${givenAway.swapWithPerson} ile`
+          : '';
+        finalStatusText = `İzinli (${targetPart}${partnerSuffix} değişti)`;
+      } else {
+        const initiatorLabel = givenAway.swapMyPerson
+          ? ` · ${givenAway.swapMyPerson} ile`
+          : '';
+        finalStatusText = `İzinli (${trDateFormatter(givenAway.date)}${initiatorLabel} değişti)`;
+      }
+    }
+
+    const prevGivenAway = applicableNotes.find((it) => isGivenAwayOnDate(it, prevDateISO));
+    if (prevGivenAway && morningCarryover) {
+      morningCarryover = null;
+      if (!dayShift && !nightShift && !givenAway && !cancelShiftNote) {
+        finalStatusText = 'Dinlenme (Tam Gün İzinli)';
+      }
+    }
+
+    // 2. Day taken over / shifted to this date (on duty due to swap or shift move)
+    const takenOver = applicableNotes.find((it) => isTakenOverOnDate(it, isoDateStr));
     if (takenOver) {
-      const partnerLabel = takenOver.swapWithPerson
+      const isPartner = isSwapPartnerForNote(takenOver);
+      const partnerLabel = isPartner
+        ? takenOver.swapMyPerson
+          ? `${takenOver.swapMyPerson} yerine`
+          : `${trDateFormatter(takenOver.date)} nöbeti`
+        : takenOver.swapWithPerson
         ? `${takenOver.swapWithPerson} yerine`
-        : `${trDateFormatter(takenOver.date)} yerine`;
-      if (takenOver.swapShiftType === 'GUNDUZ') {
+        : takenOver.date !== isoDateStr
+        ? `${trDateFormatter(takenOver.date)} yerine`
+        : takenOver.desc || 'Nöbet Değişimi';
+
+      if (settings.is24HourSystem) {
+        const [s24H, s24M] = parseHM(settings.shift24Start || settings.dayStart);
+        const sDT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), s24H, s24M, 0, 0);
+        const eDT = addMinutes(sDT, 24 * 60);
+        dayShift = {
+          groupIdx: actualGroupIdx,
+          groupName: gName,
+          shiftType: 'GUNDUZ',
+          startDT: sDT,
+          endDT: eDT,
+          durationHours: 24,
+        };
+        nightShift = null;
+        finalStatusText = `🔄☀️ 24 Saat Nöbeti (${partnerLabel})`;
+      } else if (takenOver.swapShiftType === 'GUNDUZ') {
         const [sh, sm] = parseHM(settings.dayStart);
         const [eh, em] = parseHM(settings.dayEnd);
         const sDT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), sh, sm, 0, 0);
         const eDT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh, em, 0, 0);
-        const dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+        let dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+        if (dur <= 0) dur += 24;
         dayShift = {
           groupIdx: actualGroupIdx,
           groupName: gName,
@@ -343,13 +517,15 @@ export const querySingleDayForGroup = (
           endDT: eDT,
           durationHours: dur,
         };
+        nightShift = null; // Clear any opposite night shift on the same day
         finalStatusText = `🔄☀️ Gündüz Nöbeti (${partnerLabel})`;
       } else {
         const [sh, sm] = parseHM(settings.nightStart);
         const [eh, em] = parseHM(settings.nightEnd);
         const sDT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), sh, sm, 0, 0);
         const eDT = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, eh, em, 0, 0);
-        const dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+        let dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+        if (dur <= 0) dur += 24;
         nightShift = {
           groupIdx: actualGroupIdx,
           groupName: gName,
@@ -358,23 +534,21 @@ export const querySingleDayForGroup = (
           endDT: eDT,
           durationHours: dur,
         };
+        dayShift = null; // Clear any opposite morning/day shift on the same day
         finalStatusText = `🔄🌙 Akşam Nöbeti (${partnerLabel})`;
       }
     }
 
-    const prevDateISO = toISODate(addDays(d, -1));
-    const prevTakenNight = (notes || []).find(
-      (it) =>
-        it.type === 'Nöbet Değişimi' &&
-        it.swapTargetDate === prevDateISO &&
-        it.swapShiftType === 'AKSAM'
+    const prevTakenNight = applicableNotes.find(
+      (it) => it.swapShiftType === 'AKSAM' && isTakenOverOnDate(it, prevDateISO)
     );
-    if (prevTakenNight && !dayShift && !nightShift) {
+    if (prevTakenNight && !settings.is24HourSystem) {
       const [sh, sm] = parseHM(settings.nightStart);
       const [eh, em] = parseHM(settings.nightEnd);
       const sDT = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1, sh, sm, 0, 0);
       const eDT = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh, em, 0, 0);
-      const dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+      let dur = (eDT.getTime() - sDT.getTime()) / 3600000;
+      if (dur <= 0) dur += 24;
       morningCarryover = {
         groupIdx: actualGroupIdx,
         groupName: gName,
@@ -383,7 +557,138 @@ export const querySingleDayForGroup = (
         endDT: eDT,
         durationHours: dur,
       };
-      finalStatusText = '🌅 Nöbet Çıkışı (Değişimden)';
+      if (!dayShift && !nightShift) {
+        finalStatusText = '🌅 Nöbet Çıkışı (Değişimden)';
+      }
+    }
+
+    // 3. Check for Ek Nöbet (Admin-assigned manual shift S/A from Monthly Roster Table or Admin Panel)
+    const extraShiftNote = applicableNotes.find(
+      (it) => it.date === isoDateStr && it.type === 'Ek Nöbet'
+    );
+    if (extraShiftNote) {
+      const targetType: 'GUNDUZ' | 'AKSAM' =
+        extraShiftNote.swapShiftType === 'AKSAM' ? 'AKSAM' : 'GUNDUZ';
+      const [yNum, mNum, dNum] = isoDateStr.split('-').map(Number);
+      const [dayDurH, nightDurH] = getShiftDurations(settings);
+      if (settings.is24HourSystem) {
+        const [s24H, s24M] = parseHM(settings.shift24Start || settings.dayStart);
+        const sDT = new Date(yNum, mNum - 1, dNum, s24H, s24M);
+        const eDT = addMinutes(sDT, 24 * 60);
+        dayShift = {
+          groupIdx: actualGroupIdx,
+          groupName: gName,
+          shiftType: 'GUNDUZ',
+          startDT: sDT,
+          endDT: eDT,
+          durationHours: 24,
+        };
+        nightShift = null;
+        finalStatusText = `☀️ Ek Nöbet (24 Sa)${
+          extraShiftNote.desc ? ` · ${extraShiftNote.desc}` : ''
+        }`;
+      } else if (targetType === 'AKSAM') {
+        const [nSH, nSM] = parseHM(settings.nightStart);
+        const sDT = new Date(yNum, mNum - 1, dNum, nSH, nSM);
+        const eDT = addMinutes(sDT, nightDurH * 60);
+        nightShift = {
+          groupIdx: actualGroupIdx,
+          groupName: gName,
+          shiftType: 'AKSAM',
+          startDT: sDT,
+          endDT: eDT,
+          durationHours: nightDurH,
+        };
+        dayShift = null; // Clear any base morning shift so moving to 28 Akşam shows purely Akşam!
+        finalStatusText = `🌙 Ek Nöbet (Akşam - A)${
+          extraShiftNote.desc ? ` · ${extraShiftNote.desc}` : ''
+        }`;
+      } else {
+        const [dSH, dSM] = parseHM(settings.dayStart);
+        const sDT = new Date(yNum, mNum - 1, dNum, dSH, dSM);
+        const eDT = addMinutes(sDT, dayDurH * 60);
+        dayShift = {
+          groupIdx: actualGroupIdx,
+          groupName: gName,
+          shiftType: 'GUNDUZ',
+          startDT: sDT,
+          endDT: eDT,
+          durationHours: dayDurH,
+        };
+        nightShift = null; // Clear any base evening shift so moving to Sabah shows purely Sabah!
+        finalStatusText = `☀️ Ek Nöbet (Sabah - S)${
+          extraShiftNote.desc ? ` · ${extraShiftNote.desc}` : ''
+        }`;
+      }
+    }
+
+    const prevExtraNight = applicableNotes.find(
+      (it) => it.date === prevDateISO && it.type === 'Ek Nöbet' && it.swapShiftType === 'AKSAM'
+    );
+    if (prevExtraNight && !settings.is24HourSystem) {
+      const [, nightDurH] = getShiftDurations(settings);
+      const [nSH, nSM] = parseHM(settings.nightStart);
+      const prevD = addDays(d, -1);
+      const sDT = new Date(prevD.getFullYear(), prevD.getMonth(), prevD.getDate(), nSH, nSM, 0, 0);
+      const eDT = addMinutes(sDT, nightDurH * 60);
+      morningCarryover = {
+        groupIdx: actualGroupIdx,
+        groupName: gName,
+        shiftType: 'AKSAM',
+        startDT: sDT,
+        endDT: eDT,
+        durationHours: nightDurH,
+      };
+      if (!dayShift && !nightShift) {
+        finalStatusText = '🌅 Nöbet Çıkışı (Ek Nöbet)';
+      }
+    }
+
+    // 4. Check for İcap Nöbeti (On-Call Shift: Yellow cell with S or A)
+    const icapNote = applicableNotes.find((it) => {
+      if (it.date !== isoDateStr || it.type === 'Nöbet Değişimi') return false;
+      const lower = `${it.type} ${it.desc}`.toLocaleLowerCase('tr-TR');
+      return it.type === 'İcap Nöbeti' || lower.includes('icap') || lower.includes('i̇cap');
+    });
+    if (icapNote) {
+      const icapCode = settings.is24HourSystem
+        ? '24'
+        : icapNote.swapShiftType === 'AKSAM'
+        ? 'A'
+        : 'S';
+      finalStatusText = `🟨 İcap Nöbeti (${icapCode})${
+        icapNote.swapMyPerson ? ` · ${icapNote.swapMyPerson}` : ''
+      }`;
+    }
+
+    // 5. Check for İzin / Rapor (Official or Individual Leave)
+    const isLeaveNote = (it: NoteItem, targetISO: string): boolean => {
+      if (it.date !== targetISO || it.type === 'Nöbet Değişimi') return false;
+      const lower = `${it.type} ${it.desc}`.toLocaleLowerCase('tr-TR');
+      return (
+        it.type === 'İzin / Rapor' ||
+        lower.includes('izin') ||
+        lower.includes('rapor') ||
+        lower.includes('yıllık') ||
+        lower.includes('ücretsiz')
+      );
+    };
+
+    const leaveNote = applicableNotes.find((it) => isLeaveNote(it, isoDateStr));
+    if (leaveNote) {
+      dayShift = null;
+      nightShift = null;
+      finalStatusText = `🟪 İzinli (${
+        leaveNote.swapMyPerson ? `${leaveNote.swapMyPerson} · ` : ''
+      }${leaveNote.desc || 'İzin / Rapor'})`;
+    }
+
+    const prevLeaveNote = applicableNotes.find((it) => isLeaveNote(it, prevDateISO));
+    if (prevLeaveNote && morningCarryover) {
+      morningCarryover = null;
+      if (!dayShift && !nightShift && !leaveNote && !cancelShiftNote && !givenAway) {
+        finalStatusText = 'Dinlenme (Tam Gün İzinli)';
+      }
     }
   }
 
@@ -468,15 +773,18 @@ const normalizePersonTR = (raw: string): string => {
     .replace(/\s+/g, ' ');
 };
 
-const isSamePersonNameTR = (nameA: string, nameB: string): boolean => {
+export const isSamePersonNameTR = (nameA: string, nameB: string): boolean => {
   const a = normalizePersonTR(nameA);
   const b = normalizePersonTR(nameB);
   if (!a || !b) return false;
   if (a === b) return true;
+  const fa = foldTurkishToAsciiLower(a).replace(/\s+/g, ' ').trim();
+  const fb = foldTurkishToAsciiLower(b).replace(/\s+/g, ' ').trim();
+  if (fa && fb && fa === fb) return true;
   const partsA = a.split(' ');
   const partsB = b.split(' ');
   if (
-    partsA[0] === partsB[0] &&
+    (partsA[0] === partsB[0] || (fa && fb && fa.split(' ')[0] === fb.split(' ')[0])) &&
     partsA[0].length >= 3 &&
     (partsA.length === 1 || partsB.length === 1)
   ) {
@@ -485,10 +793,140 @@ const isSamePersonNameTR = (nameA: string, nameB: string): boolean => {
   return false;
 };
 
+const foldTurkishToAsciiLower = (raw: string): string => {
+  return (raw || '')
+    .normalize('NFC')
+    .replace(/İ/g, 'i')
+    .replace(/I/g, 'i')
+    .replace(/ı/g, 'i')
+    .replace(/Ş/g, 's')
+    .replace(/ş/g, 's')
+    .replace(/Ğ/g, 'g')
+    .replace(/ğ/g, 'g')
+    .replace(/Ü/g, 'u')
+    .replace(/ü/g, 'u')
+    .replace(/Ö/g, 'o')
+    .replace(/ö/g, 'o')
+    .replace(/Ç/g, 'c')
+    .replace(/ç/g, 'c')
+    .toLowerCase();
+};
+
+const tokenizeFoldedName = (raw: string): string[] => {
+  return foldTurkishToAsciiLower(raw)
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .split(/\s+/)
+    .map((t) => t.replace(/\d+/g, ''))
+    .filter((t) => t.length >= 2);
+};
+
+const doTokenListsStrictlyMatch = (personTokens: string[], accountTokens: string[]): boolean => {
+  if (personTokens.length === 0 || accountTokens.length === 0) return false;
+
+  if (personTokens.length === 1) {
+    return accountTokens.length === 1 && accountTokens[0] === personTokens[0];
+  }
+
+  // Multi-word personnel name requires at least 2 full matching tokens on the Google account
+  if (accountTokens.length < 2) return false;
+
+  const pSet = new Set(personTokens);
+  const aSet = new Set(accountTokens);
+
+  let matchCount = 0;
+  for (const tok of pSet) {
+    if (aSet.has(tok)) matchCount += 1;
+  }
+
+  const minLen = Math.min(pSet.size, aSet.size);
+  if (matchCount < 2 || matchCount !== minLen) {
+    return false;
+  }
+
+  // All tokens identical in any order (e.g. "Yılmaz Ahmet" <-> "Ahmet Yılmaz")
+  if (pSet.size === aSet.size && matchCount === pSet.size) {
+    return true;
+  }
+
+  // When one side includes a middle name/title, the surname (last token) must match on both sides
+  const pLast = personTokens[personTokens.length - 1];
+  const aLast = accountTokens[accountTokens.length - 1];
+  return pLast === aLast;
+};
+
+export interface GoogleIdentityMatchResult {
+  matched: boolean;
+  matchedBy?: 'displayName' | 'email';
+  accountLabel: string;
+}
+
+/**
+ * Verifies that the signed-in Google account's real name (displayName) — or strict exact full-name
+ * email prefix fallback — matches the selected personnel name so no user can impersonate another person.
+ */
+export const verifyGoogleAccountMatchesPerson = (
+  personName: string,
+  user: { displayName?: string | null; email?: string | null } | null | undefined
+): GoogleIdentityMatchResult => {
+  const cleanPerson = (personName || '').trim();
+  const displayName = (user?.displayName || '').trim();
+  const email = (user?.email || '').trim();
+  const accountLabel = displayName || email || 'Google Hesabı';
+
+  if (!cleanPerson || !user) {
+    return { matched: false, accountLabel };
+  }
+
+  const personTokens = tokenizeFoldedName(cleanPerson);
+  if (personTokens.length === 0) {
+    return { matched: false, accountLabel };
+  }
+
+  // 1. Primary check: Google Account displayName
+  if (displayName) {
+    const accountTokens = tokenizeFoldedName(displayName);
+    if (doTokenListsStrictlyMatch(personTokens, accountTokens)) {
+      return { matched: true, matchedBy: 'displayName', accountLabel };
+    }
+  }
+
+  // 2. Secondary check: Strict exact full-name email local-part match (for accounts without a full displayName)
+  if (email && email.includes('@')) {
+    const localPart = foldTurkishToAsciiLower(email.split('@')[0] || '');
+    const emailTokens = localPart
+      .replace(/[^a-z]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter((t) => t.length >= 2);
+
+    if (doTokenListsStrictlyMatch(personTokens, emailTokens)) {
+      return { matched: true, matchedBy: 'email', accountLabel };
+    }
+
+    const compactEmail = localPart.replace(/[^a-z]/g, '');
+    if (personTokens.length >= 2 && compactEmail.length >= 5) {
+      const fullConcat = personTokens.join('');
+      const firstLastConcat = `${personTokens[0]}${personTokens[personTokens.length - 1]}`;
+      const lastFirstConcat = `${personTokens[personTokens.length - 1]}${personTokens[0]}`;
+      if (
+        compactEmail === fullConcat ||
+        compactEmail === firstLastConcat ||
+        compactEmail === lastFirstConcat
+      ) {
+        return { matched: true, matchedBy: 'email', accountLabel };
+      }
+    }
+  }
+
+  return { matched: false, accountLabel };
+};
+
 export interface EffectiveGroupMemberItem {
   name: string;
   isSwappedIn?: boolean;
   replacedName?: string;
+  isExtraShift?: boolean;
+  isIcap?: boolean;
 }
 
 export interface EffectiveGroupMembersResult {
@@ -497,9 +935,10 @@ export interface EffectiveGroupMembersResult {
 }
 
 /**
- * Verilen tarih ve vardiyada ilgili grubun personel listesini döner.
- * Eğer o gün/gece için bir Nöbet Değişimi (Becayiş) kaydı varsa,
- * listedeki eski personelin yerine nöbet değişimi yapılan kişiyi koyar.
+ * Verilen tarih ve vardiyada ilgili grubun (veya o vardiyanın) gerçekte nöbette olan personel listesini döner:
+ * - Nöbet Değişimi (Becayiş) yapılan personeli yerine geçen kişiyle değiştirir.
+ * - O gün İzin / Rapor veya Nöbet Boşa Çıkarma kaydı olan personeli nöbetçi listesinden çıkarır (izinli olduğunda yazmaz).
+ * - O gün ilgili vardiyaya Ek Nöbet veya İcap Nöbeti yazılan personeli nöbetçi listesine ekler.
  */
 export const getEffectiveGroupMembersForShift = (
   isoDateStr: string,
@@ -516,7 +955,7 @@ export const getEffectiveGroupMembersForShift = (
     .map((p) => formatTitleCaseTRLocal(p))
     .filter(Boolean);
 
-  const memberItems: EffectiveGroupMemberItem[] = baseNames.map((name) => ({ name }));
+  let memberItems: EffectiveGroupMemberItem[] = baseNames.map((name) => ({ name }));
 
   if (!notes || notes.length === 0 || !isoDateStr) {
     return {
@@ -560,7 +999,6 @@ export const getEffectiveGroupMembersForShift = (
       }
     }
 
-    // Eğer grupta tek kişi varsa veya eski isim eşleşmediyse ilk personeli değiştir
     if (memberItems.length >= 1) {
       const oldName = memberItems[0].name;
       if (!isSamePersonNameTR(oldName, cleanIncoming)) {
@@ -579,33 +1017,50 @@ export const getEffectiveGroupMembersForShift = (
     }
   };
 
+  // 1. Apply Nöbet Değişimi (Swaps / Becayiş)
   for (const note of notes) {
     if (note.type !== 'Nöbet Değişimi') continue;
 
     const noteWithPerson = formatTitleCaseTRLocal(note.swapWithPerson || '');
     const noteMyPerson = formatTitleCaseTRLocal(note.swapMyPerson || defaultMyPerson);
+    const notePersonGroupIdx = findWorkerGroupIdxInSettings(noteMyPerson, settings);
+    const effectiveNoteOriginGroupIdx =
+      notePersonGroupIdx !== null
+        ? notePersonGroupIdx
+        : typeof note.targetGroupIdx === 'number'
+        ? note.targetGroupIdx
+        : myGroupIdx;
 
     // DURUM 1: Devredilen nöbet günü (note.date === isoDateStr)
     if (note.date === isoDateStr) {
-      const myNormalDay = querySingleDayForGroup(isoDateStr, myGroupIdx, settings, refHistory, []);
-      const myNormalShift: 'GUNDUZ' | 'AKSAM' | null = myNormalDay.nightShift
+      const originNormalDay = querySingleDayForGroup(
+        isoDateStr,
+        effectiveNoteOriginGroupIdx,
+        settings,
+        refHistory,
+        []
+      );
+      const originNormalShift: 'GUNDUZ' | 'AKSAM' | null = originNormalDay.nightShift
         ? 'AKSAM'
-        : myNormalDay.dayShift
+        : originNormalDay.dayShift
         ? 'GUNDUZ'
         : null;
 
-      // Kendi grubum bu vardiyada nöbetçiyse: kendi personelim (eski personel) çıkar, nöbet değişimi yapılan kişi (noteWithPerson) girer
-      const isMyGroupOnThisShift =
-        groupIdx === myGroupIdx &&
-        (shiftType === null || myNormalShift === null || shiftType === myNormalShift);
+      const isOriginGroupOnThisShift =
+        groupIdx === effectiveNoteOriginGroupIdx &&
+        (shiftType === null || originNormalShift === null || shiftType === originNormalShift);
 
-      // Veya bu grubun içinde swapMyPerson doğrudan yer alıyorsa
       const hasMyPersonInThisGroup =
         Boolean(noteMyPerson) &&
         memberItems.some((m) => isSamePersonNameTR(m.name, noteMyPerson));
 
-      if ((isMyGroupOnThisShift || hasMyPersonInThisGroup) && noteWithPerson) {
-        applyReplacement(noteMyPerson, noteWithPerson);
+      if (isOriginGroupOnThisShift || hasMyPersonInThisGroup) {
+        if (noteWithPerson) {
+          applyReplacement(noteMyPerson, noteWithPerson);
+        } else if (noteMyPerson) {
+          // Devredilen gün karşılık kişi yazılmamışsa kendi personeli listeden çıkar
+          memberItems = memberItems.filter((m) => !isSamePersonNameTR(m.name, noteMyPerson));
+        }
       }
     }
 
@@ -618,9 +1073,7 @@ export const getEffectiveGroupMembersForShift = (
         shiftType === note.swapShiftType ||
         settings.is24HourSystem;
 
-      if (shiftMatches && partnerGroupIdx === groupIdx) {
-        // Hedef grupta noteWithPerson varsa (eski personel), onun yerine noteMyPerson (ben) geçer.
-        // Eğer kullanıcı ters girmişse veya noteMyPerson hedef gruptaysa, onun yerine noteWithPerson geçer.
+      if (shiftMatches && (partnerGroupIdx === groupIdx || partnerGroupIdx === null)) {
         const hasWithInTarget =
           Boolean(noteWithPerson) &&
           memberItems.some((m) => isSamePersonNameTR(m.name, noteWithPerson));
@@ -632,14 +1085,94 @@ export const getEffectiveGroupMembersForShift = (
           applyReplacement(noteWithPerson, noteMyPerson);
         } else if (hasMyInTarget && noteWithPerson) {
           applyReplacement(noteMyPerson, noteWithPerson);
-        } else if (noteWithPerson && noteMyPerson) {
-          applyReplacement(noteWithPerson, noteMyPerson);
-        } else if (noteWithPerson) {
-          applyReplacement('', noteWithPerson);
-        } else if (noteMyPerson) {
-          applyReplacement('', noteMyPerson);
+        } else if (partnerGroupIdx === groupIdx) {
+          if (noteWithPerson && noteMyPerson) {
+            applyReplacement(noteWithPerson, noteMyPerson);
+          } else if (noteMyPerson && !memberItems.some((m) => isSamePersonNameTR(m.name, noteMyPerson))) {
+            memberItems.push({
+              name: noteMyPerson,
+              isSwappedIn: true,
+            });
+          } else if (noteWithPerson) {
+            applyReplacement('', noteWithPerson);
+          }
         }
       }
+    }
+  }
+
+  // Determine if this group is the active group on duty for `shiftType` on `isoDateStr`
+  const thisGroupBaseDay = querySingleDayForGroup(isoDateStr, groupIdx, settings, refHistory, []);
+  const isThisGroupOnRequestedShift =
+    shiftType === 'GUNDUZ'
+      ? Boolean(thisGroupBaseDay.dayShift)
+      : shiftType === 'AKSAM'
+      ? Boolean(thisGroupBaseDay.nightShift)
+      : Boolean(thisGroupBaseDay.dayShift || thisGroupBaseDay.nightShift);
+
+  // 2. Apply Ek Nöbet & İcap Nöbeti (add person if assigned to this shift on isoDateStr, or remove from their morning shift if moved to evening on same day)
+  for (const note of notes) {
+    if (note.date !== isoDateStr) continue;
+    const person = formatTitleCaseTRLocal(note.swapMyPerson || '');
+    if (!person) continue;
+
+    const lower = `${note.type} ${note.desc}`.toLocaleLowerCase('tr-TR');
+    const isExtra = note.type === 'Ek Nöbet';
+    const isIcap =
+      note.type === 'İcap Nöbeti' || lower.includes('icap') || lower.includes('i̇cap');
+
+    if (!isExtra && !isIcap) continue;
+
+    const noteShiftType: 'GUNDUZ' | 'AKSAM' =
+      note.swapShiftType === 'AKSAM' ? 'AKSAM' : 'GUNDUZ';
+
+    // If a member of THIS group was moved to the OTHER shift on the same day (e.g., from Morning to Evening), remove them from the Morning shift list
+    if (
+      shiftType !== null &&
+      !settings.is24HourSystem &&
+      noteShiftType !== shiftType &&
+      isExtra
+    ) {
+      memberItems = memberItems.filter((m) => !isSamePersonNameTR(m.name, person));
+      continue;
+    }
+
+    const matchesShift =
+      shiftType === null || settings.is24HourSystem || noteShiftType === shiftType;
+
+    const matchesTargetGroup =
+      isThisGroupOnRequestedShift ||
+      (typeof note.targetGroupIdx === 'number' && note.targetGroupIdx === groupIdx);
+
+    if (matchesShift && matchesTargetGroup) {
+      const alreadyExists = memberItems.some((m) => isSamePersonNameTR(m.name, person));
+      if (!alreadyExists) {
+        memberItems.push({
+          name: person,
+          isExtraShift: isExtra,
+          isIcap,
+        });
+      }
+    }
+  }
+
+  // 3. Apply İzin / Rapor & Nöbet Boşa Çıkarma (Exclude anyone who is on leave or removed from duty on isoDateStr!)
+  for (const note of notes) {
+    if (note.date !== isoDateStr || note.type === 'Nöbet Değişimi') continue;
+    const lower = `${note.type} ${note.desc}`.toLocaleLowerCase('tr-TR');
+    const isLeave =
+      note.type === 'İzin / Rapor' ||
+      lower.includes('izin') ||
+      lower.includes('rapor') ||
+      lower.includes('yıllık') ||
+      lower.includes('ücretsiz');
+    const isCancelled = note.type === 'Nöbet Boşa Çıkarma';
+
+    if (!isLeave && !isCancelled) continue;
+
+    const person = formatTitleCaseTRLocal(note.swapMyPerson || defaultMyPerson);
+    if (person) {
+      memberItems = memberItems.filter((m) => !isSamePersonNameTR(m.name, person));
     }
   }
 
@@ -657,7 +1190,8 @@ export const getEffectiveGroupIdxForDate = (
 ): number => {
   const ref = getActiveReferenceForDate(isoDateStr, refHistory);
   if (!ref) return 0;
-  const myGroupIdx = ref.myGroupIdx;
+  const matchedWorkerGroupIdx = findWorkerGroupIdxInSettings(settings.activeWorkerName, settings);
+  const myGroupIdx = matchedWorkerGroupIdx !== null ? matchedWorkerGroupIdx : ref.myGroupIdx;
   const d = createLocalDate(isoDateStr);
   const prevDateISO = toISODate(addDays(d, -1));
 
@@ -1043,3 +1577,122 @@ export const runBuiltInTests = (): string[] => {
 
   return logs;
 };
+
+export const countInclusiveDays = (startISO: string, endISO?: string): number => {
+  if (!startISO) return 1;
+  const targetEnd = endISO && endISO.trim() ? endISO.trim() : startISO;
+  const [sy, sm, sd] = startISO.split('-').map((n) => parseInt(n, 10));
+  const [ey, em, ed] = targetEnd.split('-').map((n) => parseInt(n, 10));
+  if (!sy || !sm || !sd || !ey || !em || !ed) return 1;
+  const s = new Date(sy, sm - 1, sd, 12, 0, 0, 0);
+  const e = new Date(ey, em - 1, ed, 12, 0, 0, 0);
+  const diff = Math.round((e.getTime() - s.getTime()) / 86400000);
+  return diff >= 0 ? diff + 1 : 1;
+};
+
+export interface GroupedNoteRecord<T> {
+  key: string;
+  startDate: string;
+  endDate: string;
+  dayCount: number;
+  type: string;
+  personName: string;
+  groupIdx?: number;
+  swapWithPerson?: string;
+  swapTargetDate?: string;
+  swapShiftType?: 'GUNDUZ' | 'AKSAM';
+  desc: string;
+  items: T[];
+}
+
+/**
+ * Birden fazla gün ardarda izin, rapor, icap, nöbet boşa çıkarma veya aynı türden kayıt alan
+ * bir personel için her günün kaydını tek tek listelemek yerine ardışık günleri birleştirerek
+ * "Başlangıç Tarihi – Bitiş Tarihi (X Gün)" şeklinde tek bir aralık kaydı olarak gruplar.
+ */
+export function groupConsecutiveRecords<
+  T extends {
+    date: string;
+    type: string;
+    desc?: string;
+    personName?: string;
+    swapMyPerson?: string;
+    groupIdx?: number;
+    targetGroupIdx?: number;
+    swapWithPerson?: string;
+    swapTargetDate?: string;
+    swapShiftType?: 'GUNDUZ' | 'AKSAM';
+  }
+>(records: T[]): GroupedNoteRecord<T>[] {
+  if (!records || records.length === 0) return [];
+
+  // Sort ascending by person, type, and date so consecutive days sit adjacent
+  const sorted = [...records].sort((a, b) => {
+    const pA = (a.personName || a.swapMyPerson || '').trim().toLocaleLowerCase('tr-TR');
+    const pB = (b.personName || b.swapMyPerson || '').trim().toLocaleLowerCase('tr-TR');
+    if (pA !== pB) return pA.localeCompare(pB, 'tr-TR');
+    if (a.type !== b.type) return a.type.localeCompare(b.type, 'tr-TR');
+    return a.date.localeCompare(b.date);
+  });
+
+  const groups: GroupedNoteRecord<T>[] = [];
+
+  for (const item of sorted) {
+    const person = (item.personName || item.swapMyPerson || '').trim();
+    const desc = (item.desc || '').trim();
+    const gIdx =
+      typeof item.groupIdx === 'number'
+        ? item.groupIdx
+        : typeof item.targetGroupIdx === 'number'
+        ? item.targetGroupIdx
+        : undefined;
+    const isSwappable = item.type === 'Nöbet Değişimi';
+
+    const lastGroup = groups.length > 0 ? groups[groups.length - 1] : null;
+    let canMerge = false;
+
+    if (
+      lastGroup &&
+      !isSwappable &&
+      lastGroup.type === item.type &&
+      isSamePersonNameTR(lastGroup.personName || 'Kişisel', person || 'Kişisel') &&
+      (lastGroup.desc || '').toLocaleLowerCase('tr-TR') === desc.toLocaleLowerCase('tr-TR') &&
+      (lastGroup.swapShiftType || 'GUNDUZ') === (item.swapShiftType || 'GUNDUZ')
+    ) {
+      if (item.date === lastGroup.endDate) {
+        canMerge = true;
+      } else {
+        const nextDayAfterLast = toISODate(addDays(createLocalDate(lastGroup.endDate), 1));
+        if (item.date === nextDayAfterLast) {
+          canMerge = true;
+        }
+      }
+    }
+
+    if (canMerge && lastGroup) {
+      if (item.date > lastGroup.endDate) {
+        lastGroup.endDate = item.date;
+        lastGroup.dayCount = countInclusiveDays(lastGroup.startDate, lastGroup.endDate);
+      }
+      lastGroup.items.push(item);
+    } else {
+      groups.push({
+        key: `${person || 'local'}_${item.type}_${item.date}_${groups.length}`,
+        startDate: item.date,
+        endDate: item.date,
+        dayCount: 1,
+        type: item.type,
+        personName: person,
+        groupIdx: gIdx,
+        swapWithPerson: item.swapWithPerson,
+        swapTargetDate: item.swapTargetDate,
+        swapShiftType: item.swapShiftType,
+        desc,
+        items: [item],
+      });
+    }
+  }
+
+  return groups.sort((a, b) => b.startDate.localeCompare(a.startDate));
+}
+
